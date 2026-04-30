@@ -51,15 +51,19 @@ Look for an existing domain glossary first, in this preference order:
 
 1. `CONTEXT.md` at repo root (single context).
 2. `CONTEXT-MAP.md` at root pointing to per-context `CONTEXT.md` files (multi-context repo).
-3. Any project `AGENTS.md` or `docs/glossary.md`.
+3. `CLAUDE.md` at repo root (Claude Code convention) — read it for any glossary section.
+4. `AGENTS.md` at repo root (cross-agent convention) — read it for any glossary section.
+5. `docs/glossary.md` or any other project-specific glossary file.
 
-If none exists in the area you're touching, **create `CONTEXT.md` lazily** — only when the first domain term is resolved during the grilling session, not preemptively.
+If a `CLAUDE.md` or `AGENTS.md` exists but contains no glossary section, treat that as the canonical location for domain terms going forward — append a `## Glossary` section there rather than creating a separate `CONTEXT.md`. Match the user's existing convention; don't introduce a new file when one already serves the purpose.
+
+If **none** of the above exists in the area you're touching, **create lazily** — only when the first domain term is resolved during the grilling session, not preemptively. Default to `CONTEXT.md` for greenfield repos; default to extending `CLAUDE.md` if the project is clearly a Claude Code workspace.
 
 During the session:
 
-- **Challenge against the glossary.** If the user uses a term that conflicts with `CONTEXT.md`, call it out: "Your glossary defines X as Y, but you seem to mean Z — which is it?"
+- **Challenge against the glossary.** If the user uses a term that conflicts with the active glossary file, call it out: "Your glossary defines X as Y, but you seem to mean Z — which is it?"
 - **Sharpen fuzzy terms.** "You're saying 'account' — Customer or User? Those are different."
-- **Update inline.** When a term is resolved, write it to `CONTEXT.md` right there. Don't batch.
+- **Update inline.** When a term is resolved, write it to the active glossary file right there. Don't batch.
 - **Don't couple to implementation.** Only include terms meaningful to domain experts.
 
 Use these terms verbatim in code, comments, tests, commits, and conversation thereafter.
@@ -155,7 +159,7 @@ Confirm each item before generating implementation code:
 
 ```
 - [ ] Phase 1: Design concept established via grill-me interview
-- [ ] Phase 2: Domain terms captured in CONTEXT.md (created lazily if absent)
+- [ ] Phase 2: Domain terms captured in the active glossary (CONTEXT.md / CLAUDE.md / AGENTS.md), created lazily if absent
 - [ ] Phase 3: First failing test written for the next vertical slice
 - [ ] Phase 4: Module shape proposed; deletion test applied; seams justified by ≥2 adapters
 - [ ] Phase 5: Interface defined (types + invariants + ordering + error modes + config)
