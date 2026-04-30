@@ -65,7 +65,7 @@ Format the batched entry as one journal entry with a `## ... — smart-mode — 
 
 | Command | What it does |
 |---|---|
-| `evolve review` | Walks pending proposals one at a time. For each: show diff, ask approve/reject/defer. Approved → apply + move to `accepted/`. Rejected → ask for reason, move to `rejected/`. Deferred → leave in queue. Also lists stale preferences (>30 days unreferenced) for confirm-or-prune. |
+| `evolve review` | Walks pending proposals one at a time. **Default stance: reject when uncertain** (Princeton research: auto-modified context can degrade performance by 23%). For each: show diff, ask approve/reject/defer. Approved → apply + move to `accepted/`. Rejected → ask for reason, move to `rejected/`. Deferred → leave in queue. Also lists stale preferences (>30 days unreferenced) for confirm-or-prune, and (when `PREFERENCES.md` is at soft cap) flags least-cited preferences for compaction. |
 | `evolve promote <one-line preference>` | Manually escalate a journal observation to `PREFERENCES.md` immediately, bypassing thresholds. |
 | `evolve propose <skill-name> <description>` | Manually generate a proposal targeting a specific skill. Bypasses pattern-detection. |
 | `evolve undo` | `git revert HEAD` in the journal repo. Reverts the last auto-write. |
@@ -84,12 +84,44 @@ Format the batched entry as one journal entry with a `## ... — smart-mode — 
 
 When a promotion fires:
 
-1. Write the new entry to the appropriate section of `PREFERENCES.md` (e.g., `## Smart-mode`).
-2. Update each cited journal entry's status from `pending (X/N)` to `promoted YYYY-MM-DD`.
-3. Commit with message: `Promote: <one-line preference> (from N journal entries)`.
-4. Announce in chat: *"Promoted to PREFERENCES.md: \[pattern]. Will be read by smart-mode at Phase 0 going forward."*
+1. Apply the **positive-framing requirement** (see below). If the candidate cannot be reframed positively, do not promote — leave it in the journal as context.
+2. Write the new entry to the appropriate section of `PREFERENCES.md` (e.g., `## Smart-mode`).
+3. Update each cited journal entry's status from `pending (X/N)` to `promoted YYYY-MM-DD`.
+4. Commit with message: `Promote: <one-line preference> (from N journal entries)`.
+5. Announce in chat: *"Promoted to PREFERENCES.md: \[pattern]. Will be read by smart-mode at Phase 0 going forward."*
+
+### Positive-framing requirement (the pink-elephant rule)
+
+Research on negative constraints in agent prompts ([Semantic Gravity Wells, arXiv 2601.08070](https://www.arxiv.org/pdf/2601.08070)) shows that **negative framing fails 87.5% of the time** — telling an agent "don't do X" *activates* X in its attention 4.4× more than a positive instruction suppresses it. Every preference in `PREFERENCES.md` must be expressed positively or it actively makes the agent worse.
+
+Reframe negative declarations to positive equivalents at promotion time:
+
+| Negative declaration (rejected) | Positive reframe (promoted) |
+|---|---|
+| "Never grill me on small changes" | "Default to surgical-refactor classification for changes ≤5 lines" |
+| "Don't set up testing for trivial work" | "Skip Phase 3 when Phase 0 classifies as trivial or surgical-refactor" |
+| "Stop being verbose" | "Lead with the answer; full explanation only when asked" |
+| "Don't propose deep modules until I ask" | "Surface deep-module candidates only when Phase 4 is selected" |
+
+If a user signal **cannot** be cleanly reframed positively (e.g., a vague "I don't like this approach"), do not promote it. Capture it in the journal as context for `evolve review` and surface during the next review pass — the user can clarify with a positive equivalent or the entry can be discarded.
+
+### Size policy
+
+Research on AGENTS.md ([Princeton study, cited via asdlc.io](https://asdlc.io/practices/agents-md-spec/)) shows unnecessary context **actively harms** agent performance. Letta's memory-block architecture solves this with explicit size limits and recursive summarization. We do the same:
+
+- **Soft cap: 30 active preferences across all sections.** When `PREFERENCES.md` reaches this size, the next `evolve review` flags the least-cited preferences (lowest occurrence count, oldest last-referenced date) for compaction or removal.
+- **Hard cap: 60 active preferences.** Beyond this, every new promotion automatically supersedes the lowest-cited existing preference (moved to `## Superseded` with reason `auto-evicted at hard cap`). Announce the eviction in chat.
+- **Compaction strategy:** when multiple preferences cover related territory, `evolve review` proposes merging them into a single positively-framed preference. The agent suggests the merged form; the user approves or edits.
+
+The Superseded section has no cap — it's an audit trail, not active context. Smart-mode reads only the `## Smart-mode`, `## General`, and any other active section headers, never `## Superseded`.
 
 ### PREFERENCES.md → proposals/ (auto, but never applied)
+
+### PREFERENCES.md → proposals/ (auto, but never applied)
+
+**Bias toward rejection.** A Princeton study found **auto-generated AGENTS.md content reduced agent task success and increased cost by 23%** ([cited via asdlc.io](https://asdlc.io/practices/agents-md-spec/)), while human-written content improved success by ~4%. The asymmetry is the rationale for our propose-only model: every proposal we generate is *suspected* of being net-harmful until proven otherwise.
+
+`evolve review` should default-reject when uncertain. The user's bar for accepting a proposal should be: *"I can clearly see how this change makes the workflow better, and I can articulate the failure mode that motivated it."* If either is missing, reject.
 
 A proposal file is generated when EITHER:
 
@@ -99,9 +131,10 @@ A proposal file is generated when EITHER:
 Proposal generation:
 
 1. Identify the target skill. If the target would be a forked skill, **retarget** to `smart-mode/SKILL.md` as a workflow-level adaptation. Never propose changes to forks.
-2. Generate `proposals/YYYY-MM-DD-<skill-name>-<short-summary>.md` using the format in `~/.cursor/skills-journal/proposals/README.md`.
-3. Commit with message: `Propose: <short summary> targeting <skill-name>`.
-4. Announce in chat: *"Proposal queued: review with `evolve review`."* — non-blocking notice.
+2. Apply the positive-framing requirement to any prose introduced by the diff.
+3. Generate `proposals/YYYY-MM-DD-<skill-name>-<short-summary>.md` using the format in `~/.cursor/skills-journal/proposals/README.md`.
+4. Commit with message: `Propose: <short summary> targeting <skill-name>`.
+5. Announce in chat: *"Proposal queued: review with `evolve review`. Note: default-reject when uncertain — research shows auto-modified context can degrade performance."* — non-blocking notice.
 
 ## Conflict resolution
 
@@ -163,6 +196,18 @@ If the directory exists, just confirm it's a git repo and proceed.
 | Forked skill gets a real bug that PREFERENCES.md works around | The workaround lives in `smart-mode` (workflow-level), not the fork. Fork can be re-synced to upstream cleanly. |
 | User wants to start fresh | `evolve reset` (two-step, deliberate) |
 
-## Source
+## Source and research lineage
 
-Original to this repo. Designed as a tiered learning system: append-only capture (always safe), threshold-based preference promotion (auto with tier rules), propose-only skill modification (always user-approved). The thresholds (N=1/2/3 by signal strength) and the >7-days/>5-citations criteria for proposal generation are calibrated for resilience over speed: a single bad session cannot move the system, but repeated genuine signal does.
+Original to this repo, but not invented from whole cloth. The architecture matches several established research patterns:
+
+- **Reflexion** ([Shinn et al., NeurIPS 2023](https://paperswithcode.com/paper/reflexion-language-agents-with-verbal)) — actor + evaluator + verbal self-reflection stored in episodic memory. Learning happens through context, not weight updates. Our `JOURNAL.md` is the episodic memory; promotion to `PREFERENCES.md` is the verbal reflection distillation.
+- **Memento-Skills** ([arXiv 2603.18743](https://arxiv.org/pdf/2603.18743v1)) — markdown files as persistent, evolving memory; Read-Write Reflective Learning lets agents update their skill library based on new experience without modifying LLM parameters. Almost identical shape to evolve-skills.
+- **MemSkill** ([arXiv 2602.02474](https://arxiv.org/pdf/2602.02474)) — controller selects relevant memory skills; a "designer" component periodically reviews difficult cases and evolves the skill set. Our `evolve review` plus auto-proposal generation is the designer.
+- **MemMachine / Letta / MemGPT** — short-term + episodic + profile memory with explicit size limits and recursive summarization. Our PREFERENCES.md soft/hard caps and compaction strategy come directly from this.
+
+Two empirical findings shape the safety design:
+
+- **Negative-constraint backfire** ([Semantic Gravity Wells, arXiv 2601.08070](https://www.arxiv.org/pdf/2601.08070)): negative framing fails 87.5% of the time, with the forbidden behavior receiving 4.4× more attention than positive framing suppresses. → Positive-framing requirement at promotion time.
+- **Auto-generated agent context degrades performance** (Princeton study on AGENTS.md, [asdlc.io](https://asdlc.io/practices/agents-md-spec/)): human-written +4%, auto-generated **-23%** cost / reduced success. → Bias toward rejection at `evolve review` time. Propose-only model is non-negotiable.
+
+Calibration choices (thresholds N=1/2/3 by signal strength, >7-days/>5-citations for proposal generation, soft cap 30 / hard cap 60 for `PREFERENCES.md`) are tuned for resilience over speed: a single bad session cannot move the system, but repeated genuine signal does.
