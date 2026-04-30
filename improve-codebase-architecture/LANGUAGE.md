@@ -25,6 +25,9 @@ _Avoid_: boundary (overloaded with DDD's bounded context).
 **Adapter**
 A concrete thing that satisfies an interface at a seam. Describes *role* (what slot it fills), not substance (what's inside).
 
+**File** _(physical, distinct from Module)_
+A unit of source code in the filesystem. A module can span multiple files; a file can contain multiple modules. File boundaries are decisions about cohesion and lifecycle, not arbitrary size limits. The metric is conceptual coherence, not line count. See [`../smart-mode/FILE-HYGIENE.md`](../smart-mode/FILE-HYGIENE.md) for the file-vs.-module judgment.
+
 **Leverage**
 What callers get from depth. More capability per unit of interface they have to learn. One implementation pays back across N call sites and M tests.
 

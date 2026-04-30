@@ -6,7 +6,7 @@ The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your
 
 ## Skills
 
-- **[smart-mode](./smart-mode/SKILL.md)** — A disciplined design-first workflow for AI-assisted software engineering. Phase 0 classifies the request (trivial / surgical / feature / system) and selects which downstream phases run. Triggered by saying *"smart mode"*.
+- **[smart-mode](./smart-mode/SKILL.md)** — A disciplined design-first workflow for AI-assisted software engineering. Phase 0 classifies the request (trivial / surgical / feature / system) and selects which downstream phases run. Includes [`FILE-HYGIENE.md`](./smart-mode/FILE-HYGIENE.md) — explicit forward-pressure judgment for when to extract a concept into its own file, countering AI's minimal-change bias toward bloated files. Triggered by saying *"smart mode"*.
 - **[grill-with-docs](./grill-with-docs/SKILL.md)** — Grilling session that challenges your plan against the existing domain model, sharpens terminology, and updates `CONTEXT.md` and ADRs inline as decisions crystallize. Used by smart-mode for phases 1–2.
 - **[improve-codebase-architecture](./improve-codebase-architecture/SKILL.md)** — Surface deepening opportunities (refactors that turn shallow modules into deep ones) in an existing codebase. Run every few days as a periodic practice. Smart-mode hands off here for retroactive rescue.
 - **[diagnose](./diagnose/SKILL.md)** — Disciplined diagnosis loop for hard bugs and performance regressions: build a deterministic feedback loop → reproduce → rank 3–5 falsifiable hypotheses → instrument → fix with regression test → post-mortem. Smart-mode hands off here for bug/perf work.
@@ -72,7 +72,8 @@ skills/
 ├── LICENSE
 ├── smart-mode/
 │   ├── SKILL.md
-│   └── LANGUAGE.md
+│   ├── LANGUAGE.md
+│   └── FILE-HYGIENE.md          (file-vs.-module judgment; counters AI's minimal-change bias)
 ├── grill-with-docs/
 │   ├── SKILL.md
 │   ├── CONTEXT-FORMAT.md

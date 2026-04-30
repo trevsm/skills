@@ -230,6 +230,26 @@ Deep module                       Shallow module (avoid)
 3. **Remote-but-owned** — your own services across a network. Define a port; production HTTP/gRPC adapter, in-memory test adapter.
 4. **True external** — third-party services. Inject as a port; mock adapter in tests.
 
+### File hygiene (forward-pressure during generation)
+
+The deletion test answers *"is this module shape right?"* It does not answer *"should this thing be its own file?"* That is a separate judgment, and it is the one AI-assisted generation most often gets wrong. The failure mode has a name: **minimal-change bias** — the agent dumps every new addition into the file it was already editing because that is what was literally requested. Combined with sycophancy and limited full-file context, this drives slow drift toward 1500-line files where every individual change passed review but the cumulative shape is convoluted.
+
+**Before adding more than ~20 lines to an existing file**, apply the forward checkpoint:
+
+1. Note the file's current shape (approximate line count; how many top-level named concepts it already contains).
+2. Name what you are about to add. A domain-meaningful name is itself a signal.
+3. Apply the extract signals — **two-of-five** passes the threshold:
+   - Own domain name (the kind of name that would appear in `CONTEXT.md`)
+   - Multiple callers (≥2)
+   - Wants its own tests
+   - Different change cadence than the rest of the file
+   - Conceptually independent (explainable without the surrounding file)
+4. **Propose extraction; never silently extract.** The user decides.
+
+The metric is **cohesion**, not line count. A 600-line file that's one deep module is healthy. A 200-line file mixing five concepts is already convoluted. For full criteria, stay-inline signals, and worked examples, see [`FILE-HYGIENE.md`](FILE-HYGIENE.md).
+
+---
+
 **For retroactive deepening of existing shallow modules** (i.e., the codebase is already a ball of mud), exit smart-mode and use [`../improve-codebase-architecture/SKILL.md`](../improve-codebase-architecture/SKILL.md). Run that every few days as a recurring practice.
 
 ---

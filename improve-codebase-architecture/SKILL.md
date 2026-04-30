@@ -41,6 +41,7 @@ Then use the Agent tool with `subagent_type=Explore` to walk the codebase. Explo
 - Where have pure functions been extracted just for testability, but the real bugs hide in how they're called (no **locality**)?
 - Where do tightly-coupled modules leak across their seams?
 - Which parts of the codebase are untested, or hard to test through their current interface?
+- **Where do single files mix multiple distinct concepts** — named things with their own callers, tests, or change cadence? File-level convolution is a separate axis from module shape. A correctly-shaped module can still live in the wrong file. See [`../smart-mode/FILE-HYGIENE.md`](../smart-mode/FILE-HYGIENE.md) for the extract/stay-inline signals.
 
 Apply the **deletion test** to anything you suspect is shallow: would deleting it concentrate complexity, or just move it? A "yes, concentrates" is the signal you want.
 
