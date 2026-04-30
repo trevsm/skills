@@ -12,11 +12,15 @@ The user is the strategic architect. The agent is the tactical programmer. Surfa
 
 **Smart mode is an orchestrator.** It assesses scope first (Phase 0), then runs only the phases the request actually warrants. A typo fix does not get the same treatment as a new module.
 
-## Active across all phases: evolve-skills
+## Active across all phases: evolve-skills + stay-sharp
 
 [`../evolve-skills/SKILL.md`](../evolve-skills/SKILL.md) is active during every smart-mode session. It captures friction, corrections, and declared preferences to `~/.cursor/skills-journal/JOURNAL.md` and promotes patterns into `PREFERENCES.md` once thresholds are met. Smart-mode reads `PREFERENCES.md` at Phase 0 (see below) and runs end-of-session reflection at checklist completion.
 
 You don't need to invoke evolve-skills manually for the capture behavior — it watches for strong signals (preference declarations, repeated corrections, dissatisfaction, debugging cycles) and writes inline with one-line announcements. To review or apply learnings, say `evolve review`, `evolve promote`, `evolve propose`, `evolve undo`, or `evolve reset`.
+
+[`../stay-sharp/SKILL.md`](../stay-sharp/SKILL.md) is also active during every smart-mode session, but pointed in the opposite direction: evolve-skills adapts the agent to the user; stay-sharp keeps the user adapting to the craft. It captures competency signals (topic frequency, deferrals, thrashing, debugging cycles, concept misuse, vibes-driven decisions) to `~/.cursor/skills-journal/COMPETENCY-JOURNAL.md` and intervenes with commit-first quizzes when the user defers on a `must-know` topic. Smart-mode reads `MUST-KNOW.md` at Phase 0 (see below) and runs end-of-session reflection at checklist completion.
+
+To review or interact with stay-sharp, say `stay-sharp review`, `quiz me on <topic>`, `i know this` (in-session bypass for a commit-first quiz), `tier <topic> as <must-know|should-know|aware-of>`, or `stay-sharp status`.
 
 **Positive framing applies to grilling, too.** When the user states a preference during Phase 1 grilling, capture it positively: *"prefer X for Y"*, not *"never X"*. Negative constraints in agent context have been measured to fail 87.5% of the time and increase forbidden-behavior attention 4.4×. If the user phrases a preference negatively, ask one clarifying question to elicit the positive reframe before evolve-skills captures it. (See evolve-skills' positive-framing requirement for the worked examples.)
 
@@ -64,11 +68,11 @@ Three tests applied throughout:
 
 **Do this first, every time, before grilling.** The agent assesses the request in one pass (no user interview yet) and announces which phases will run. This is what makes smart-mode safe to invoke for small changes.
 
-### Read learned preferences
+### Read learned preferences and topic tiers
 
-Before classifying, read `~/.cursor/skills-journal/PREFERENCES.md` if it exists. Note any entries under `## Smart-mode` or `## General`. **Only mention preferences in the announcement that actually affected this particular classification or phase application** — not the full preference list. If no preferences applied, the read is silent (no mention in the announcement).
+Before classifying, read `~/.cursor/skills-journal/PREFERENCES.md` and `~/.cursor/skills-journal/MUST-KNOW.md` if they exist. From `PREFERENCES.md`, note any entries under `## Smart-mode` or `## General`. From `MUST-KNOW.md`, note the tier of any topic this request touches. **Only mention preferences or tiers in the announcement that actually affected this particular classification, phase application, or anticipated intervention** — not the full lists. If nothing applied, the reads are silent (no mention in the announcement).
 
-If the file does not exist, evolve-skills will bootstrap it on first journal capture. Proceed without it for now.
+If either file does not exist, evolve-skills / stay-sharp will bootstrap them on first capture. Proceed without them for now.
 
 ### Assess
 
@@ -319,14 +323,20 @@ Confirm only the phases Phase 0 selected. Skipped phases stay unchecked and that
 
 If a selected box is unchecked, return to that phase before continuing. Leave skipped boxes unchecked — that's the point of Phase 0.
 
-**On checklist completion** (all selected boxes checked), trigger evolve-skills' end-of-session reflection: do a single batched `JOURNAL.md` capture for any *weak* signals from the session (a phase that was skipped but turned out to matter; a workflow reordering; capability requested that no skill currently provides; phase output that was low-value). If no weak signals, no reflection — silent completion. Strong signals were already captured inline during the session.
+**On checklist completion** (all selected boxes checked), trigger end-of-session reflection for both sister skills:
+
+1. **evolve-skills**: a single batched `JOURNAL.md` capture for any *weak* signals from the session (a phase that was skipped but turned out to matter; a workflow reordering; capability requested that no skill currently provides; phase output that was low-value).
+2. **stay-sharp**: a single batched `COMPETENCY-JOURNAL.md` capture for any topics that crossed thresholds during the session, any tier-promotion candidates, and any deferrals on must-know topics that *didn't* trigger a commit-first quiz (a bug to investigate).
+
+If neither skill has anything to capture, silent completion. Strong signals were already captured inline during the session.
 
 ## Related Skills (in this repo)
 
 - [`../grill-with-docs/SKILL.md`](../grill-with-docs/SKILL.md) — phase 1+2 workhorse
 - [`../diagnose/SKILL.md`](../diagnose/SKILL.md) — bug/perf investigation (smart-mode hands off here)
 - [`../improve-codebase-architecture/SKILL.md`](../improve-codebase-architecture/SKILL.md) — retroactive deepening (run every few days)
-- [`../evolve-skills/SKILL.md`](../evolve-skills/SKILL.md) — continuous learning system (active during every smart-mode session)
+- [`../evolve-skills/SKILL.md`](../evolve-skills/SKILL.md) — agent-side continuous learning (active during every smart-mode session)
+- [`../stay-sharp/SKILL.md`](../stay-sharp/SKILL.md) — user-side competency tracking and atrophy intervention (active during every smart-mode session)
 
 ## Source
 
