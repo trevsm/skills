@@ -12,6 +12,12 @@ The user is the strategic architect. The agent is the tactical programmer. Surfa
 
 **Smart mode is an orchestrator.** It assesses scope first (Phase 0), then runs only the phases the request actually warrants. A typo fix does not get the same treatment as a new module.
 
+## Active across all phases: evolve-skills
+
+[`../evolve-skills/SKILL.md`](../evolve-skills/SKILL.md) is active during every smart-mode session. It captures friction, corrections, and declared preferences to `~/.cursor/skills-journal/JOURNAL.md` and promotes patterns into `PREFERENCES.md` once thresholds are met. Smart-mode reads `PREFERENCES.md` at Phase 0 (see below) and runs end-of-session reflection at checklist completion.
+
+You don't need to invoke evolve-skills manually for the capture behavior — it watches for strong signals (preference declarations, repeated corrections, dissatisfaction, debugging cycles) and writes inline with one-line announcements. To review or apply learnings, say `evolve review`, `evolve promote`, `evolve propose`, `evolve undo`, or `evolve reset`.
+
 ## Scope: when to engage smart-mode vs. a sister skill
 
 Smart-mode is for **new feature work and non-trivial design**. For two adjacent situations, hand off to a sister skill:
@@ -56,6 +62,12 @@ Three tests applied throughout:
 
 **Do this first, every time, before grilling.** The agent assesses the request in one pass (no user interview yet) and announces which phases will run. This is what makes smart-mode safe to invoke for small changes.
 
+### Read learned preferences
+
+Before classifying, read `~/.cursor/skills-journal/PREFERENCES.md` if it exists. Note any entries under `## Smart-mode` or `## General`. **Only mention preferences in the announcement that actually affected this particular classification or phase application** — not the full preference list. If no preferences applied, the read is silent (no mention in the announcement).
+
+If the file does not exist, evolve-skills will bootstrap it on first journal capture. Proceed without it for now.
+
 ### Assess
 
 Read the request and (if needed) explore the codebase. Then classify on four axes:
@@ -84,9 +96,11 @@ When the **reversibility** column is _load-bearing_ or _irreversible_, escalate 
 
 ### Announce (unless trivial)
 
-For anything above _trivial_, emit one line before proceeding:
+For anything above _trivial_, emit one line before proceeding. Include any preferences from `PREFERENCES.md` that **changed** the classification or selected phases:
 
-> *"Reading this as a {size} {type} {reversibility}. Will apply phases {X, Y, Z}; skipping {A, B}. Reason: {one-line}. Adjust?"*
+> *"Reading this as a {size} {type} {reversibility}. Applied preference: {one preference, only if it affected the decision}. Will apply phases {X, Y, Z}; skipping {A, B}. Reason: {one-line}. Adjust?"*
+
+If no preferences applied, omit that clause entirely.
 
 For _trivial_ work, just do it — no announcement needed.
 
@@ -281,11 +295,14 @@ Confirm only the phases Phase 0 selected. Skipped phases stay unchecked and that
 
 If a selected box is unchecked, return to that phase before continuing. Do not check skipped boxes — that defeats the point of Phase 0.
 
+**On checklist completion** (all selected boxes checked), trigger evolve-skills' end-of-session reflection: do a single batched `JOURNAL.md` capture for any *weak* signals from the session (a phase that was skipped but turned out to matter; a workflow reordering; capability requested that no skill currently provides; phase output that was low-value). If no weak signals, no reflection — silent completion. Strong signals were already captured inline during the session.
+
 ## Related Skills (in this repo)
 
 - [`../grill-with-docs/SKILL.md`](../grill-with-docs/SKILL.md) — phase 1+2 workhorse
 - [`../diagnose/SKILL.md`](../diagnose/SKILL.md) — bug/perf investigation (smart-mode hands off here)
 - [`../improve-codebase-architecture/SKILL.md`](../improve-codebase-architecture/SKILL.md) — retroactive deepening (run every few days)
+- [`../evolve-skills/SKILL.md`](../evolve-skills/SKILL.md) — continuous learning system (active during every smart-mode session)
 
 ## Source
 
