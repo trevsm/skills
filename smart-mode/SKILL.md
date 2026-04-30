@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 Code is not cheap; it is a critical asset. Reject the specs-to-code reflex — it produces unmaintainable systems and high technical debt.
 
-The user is the strategic architect. The agent is the tactical programmer. Surface trade-offs; never silently choose.
+The user is the strategic architect. The agent is the tactical programmer. Surface trade-offs; always make choices visible.
 
 **Smart mode is an orchestrator.** It assesses scope first (Phase 0), then runs only the phases the request actually warrants. A typo fix does not get the same treatment as a new module.
 
@@ -56,7 +56,7 @@ Three tests applied throughout:
 
 - **Deletion test** — imagine deleting the module. If complexity vanishes, it was a pass-through. If complexity reappears across N callers, it was earning its keep.
 - **The interface is the test surface.** If you want to test past the interface, the module is the wrong shape.
-- **One adapter = hypothetical seam. Two adapters = real seam.** Don't introduce a port unless something actually varies across it.
+- **One adapter = hypothetical seam. Two adapters = real seam.** Introduce a port only when something actually varies across it.
 
 ---
 
@@ -122,7 +122,7 @@ Triggered when Phase 0 selected `light`, `brief`, or `full` for grilling.
 - Cross-references claims with the actual code
 - Updates the glossary and (when warranted) ADRs as decisions crystallize
 
-If Phase 0 selected `light` or `brief`, cap the grilling to 1–3 questions on the highest-leverage uncertainty. Don't run a full design tree for surgical work.
+If Phase 0 selected `light` or `brief`, cap the grilling to 1–3 questions on the highest-leverage uncertainty — enough for surgical work.
 
 If a question can be answered by exploring the codebase, explore instead of asking.
 
@@ -146,12 +146,12 @@ You and the user must mean the same thing by the same words. This drastically re
 
 **File-creation rule:**
 
-- If `CLAUDE.md` or `AGENTS.md` exists with no glossary section, append a `## Glossary` section there. Don't introduce a new file when one already serves the purpose.
-- Never create `AGENTS.md` when `CLAUDE.md` exists, and vice versa. Match the project's existing convention.
+- If `CLAUDE.md` or `AGENTS.md` exists with no glossary section, append a `## Glossary` section there — extend the existing file rather than introducing a parallel one.
+- Match the project's existing convention: extend whichever file is already present (`CLAUDE.md` or `AGENTS.md`, not both).
 - Default to `CONTEXT.md` for greenfield repos. Default to extending `CLAUDE.md` if the project is clearly a Claude Code workspace.
 - **Create lazily** — only when the first domain term is resolved during the grilling session, not preemptively.
 
-**Don't conflate domain terms with user preferences.** This file (`CLAUDE.md` / `AGENTS.md` / `CONTEXT.md`) is for the *project's domain language* — terms a domain expert would recognize. *User behavioral preferences* ("skip Phase 1 grilling for changes ≤5 lines") belong in `~/.cursor/skills-journal/PREFERENCES.md`, managed by `evolve-skills`. Keep them separate: domain glossary travels with the codebase; preferences travel with the user. If during grilling the user states a behavioral preference, capture it via evolve-skills' strong-signal trigger, not in the project glossary.
+**Keep domain terms and user preferences separate.** This file (`CLAUDE.md` / `AGENTS.md` / `CONTEXT.md`) is for the *project's domain language* — terms a domain expert would recognize. *User behavioral preferences* ("skip Phase 1 grilling for changes ≤5 lines") belong in `~/.cursor/skills-journal/PREFERENCES.md`, managed by `evolve-skills`. Domain glossary travels with the codebase; preferences travel with the user. If during grilling the user states a behavioral preference, route it to evolve-skills' strong-signal trigger; the project glossary stays focused on domain language.
 
 **Format:** see [`../grill-with-docs/CONTEXT-FORMAT.md`](../grill-with-docs/CONTEXT-FORMAT.md) for the full template (`## Language` with `**Term**: definition / _Avoid_: aliases`, plus `## Relationships`, `## Example dialogue`, `## Flagged ambiguities`).
 
@@ -186,12 +186,12 @@ RIGHT (vertical):
 
 - **RED:** write one failing test for the next behavior. Use glossary vocabulary in the test name. Test through the public interface only.
 - **GREEN:** minimal code to pass. No speculative features.
-- **Refactor only when GREEN.** Never refactor while RED.
+- **Refactor only when GREEN.**
 
 **Rules:**
 
 - Test behavior through the public interface, not implementation details. The test should survive an internal refactor.
-- Mock at system boundaries only (external APIs, time, randomness, third-party SDKs). Do not mock your own modules.
+- Mock at system boundaries only (external APIs, time, randomness, third-party SDKs) — your own modules get exercised through their public interface.
 - Prefer SDK-style interfaces over generic fetchers — each external operation gets its own function so each mock returns one specific shape.
 - Project-level: check `package.json` (or equivalent) for an existing test script before adding tooling. If no test runner exists and the task warrants tests, set one up before continuing — but only if Phase 0 said TDD applies.
 
@@ -220,7 +220,7 @@ Deep module                       Shallow module (avoid)
 
 - Apply the **deletion test**.
 - A new module needs **two adapters** (typically production + test) to justify a seam. One adapter = indirection, not a seam.
-- Internal seams (private to a module's implementation, used by its own tests) are fine. Don't expose them through the public interface.
+- Internal seams (private to a module's implementation, used by its own tests) stay private to the implementation — they remain absent from the public interface.
 - Resist premature extraction. Wait for real duplication or a real seam.
 
 **Classify dependencies** (drives test strategy and adapter shape) — see `LANGUAGE.md` for full descriptions:
@@ -297,7 +297,7 @@ Confirm only the phases Phase 0 selected. Skipped phases stay unchecked and that
 - [ ] Phase 5: Interface defined (if Phase 0 selected interface design)
 ```
 
-If a selected box is unchecked, return to that phase before continuing. Do not check skipped boxes — that defeats the point of Phase 0.
+If a selected box is unchecked, return to that phase before continuing. Leave skipped boxes unchecked — that's the point of Phase 0.
 
 **On checklist completion** (all selected boxes checked), trigger evolve-skills' end-of-session reflection: do a single batched `JOURNAL.md` capture for any *weak* signals from the session (a phase that was skipped but turned out to matter; a workflow reordering; capability requested that no skill currently provides; phase output that was low-value). If no weak signals, no reflection — silent completion. Strong signals were already captured inline during the session.
 
