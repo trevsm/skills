@@ -18,6 +18,8 @@ The user is the strategic architect. The agent is the tactical programmer. Surfa
 
 You don't need to invoke evolve-skills manually for the capture behavior — it watches for strong signals (preference declarations, repeated corrections, dissatisfaction, debugging cycles) and writes inline with one-line announcements. To review or apply learnings, say `evolve review`, `evolve promote`, `evolve propose`, `evolve undo`, or `evolve reset`.
 
+**Positive framing applies to grilling, too.** When the user states a preference during Phase 1 grilling, capture it positively: *"prefer X for Y"*, not *"never X"*. Negative constraints in agent context have been measured to fail 87.5% of the time and increase forbidden-behavior attention 4.4×. If the user phrases a preference negatively, ask one clarifying question to elicit the positive reframe before evolve-skills captures it. (See evolve-skills' positive-framing requirement for the worked examples.)
+
 ## Scope: when to engage smart-mode vs. a sister skill
 
 Smart-mode is for **new feature work and non-trivial design**. For two adjacent situations, hand off to a sister skill:
@@ -148,6 +150,8 @@ You and the user must mean the same thing by the same words. This drastically re
 - Never create `AGENTS.md` when `CLAUDE.md` exists, and vice versa. Match the project's existing convention.
 - Default to `CONTEXT.md` for greenfield repos. Default to extending `CLAUDE.md` if the project is clearly a Claude Code workspace.
 - **Create lazily** — only when the first domain term is resolved during the grilling session, not preemptively.
+
+**Don't conflate domain terms with user preferences.** This file (`CLAUDE.md` / `AGENTS.md` / `CONTEXT.md`) is for the *project's domain language* — terms a domain expert would recognize. *User behavioral preferences* ("skip Phase 1 grilling for changes ≤5 lines") belong in `~/.cursor/skills-journal/PREFERENCES.md`, managed by `evolve-skills`. Keep them separate: domain glossary travels with the codebase; preferences travel with the user. If during grilling the user states a behavioral preference, capture it via evolve-skills' strong-signal trigger, not in the project glossary.
 
 **Format:** see [`../grill-with-docs/CONTEXT-FORMAT.md`](../grill-with-docs/CONTEXT-FORMAT.md) for the full template (`## Language` with `**Term**: definition / _Avoid_: aliases`, plus `## Relationships`, `## Example dialogue`, `## Flagged ambiguities`).
 
