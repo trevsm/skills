@@ -65,7 +65,7 @@ Format the batched entry as one journal entry with a `## ... — smart-mode — 
 
 | Command | What it does |
 |---|---|
-| `evolve review` | Walks pending proposals one at a time. **Default stance: reject when uncertain** (Princeton research: auto-modified context can degrade performance by 23%). For each: show diff, ask approve/reject/defer. Approved → apply + move to `accepted/`. Rejected → ask for reason, move to `rejected/`. Deferred → leave in queue. Also lists stale preferences (>30 days unreferenced) for confirm-or-prune, and (when `PREFERENCES.md` is at soft cap) flags least-cited preferences for compaction. |
+| `evolve review` | Walks pending proposals one at a time. **Default stance: reject when uncertain.** Repository-level context measurably moves agent behavior (Lulla et al. 2026 found −28.64% runtime / −16.58% tokens from AGENTS.md presence alone), so modifying it is consequential and should require articulable justification. For each proposal: show diff, ask approve/reject/defer. Approved → apply + move to `accepted/`. Rejected → ask for reason, move to `rejected/`. Deferred → leave in queue. Also lists stale preferences (>30 days unreferenced) for confirm-or-prune, and (when `PREFERENCES.md` is at soft cap) flags least-cited preferences for compaction. |
 | `evolve promote <one-line preference>` | Manually escalate a journal observation to `PREFERENCES.md` immediately, bypassing thresholds. |
 | `evolve propose <skill-name> <description>` | Manually generate a proposal targeting a specific skill. Bypasses pattern-detection. |
 | `evolve undo` | `git revert HEAD` in the journal repo. Reverts the last auto-write. |
@@ -119,7 +119,9 @@ The Superseded section has no cap — it's an audit trail, not active context. S
 
 ### PREFERENCES.md → proposals/ (auto, but never applied)
 
-**Bias toward rejection.** A Princeton study found **auto-generated AGENTS.md content reduced agent task success and increased cost by 23%** ([cited via asdlc.io](https://asdlc.io/practices/agents-md-spec/)), while human-written content improved success by ~4%. The asymmetry is the rationale for our propose-only model: every proposal we generate is *suspected* of being net-harmful until proven otherwise.
+**Bias toward rejection.** Repository-level agent context measurably changes agent behavior — Lulla et al. ([arXiv 2601.20404](https://arxiv.org/abs/2601.20404v1), Jan 2026, n=124 PRs) found that the presence of an AGENTS.md file alone shifts median runtime by **−28.64%** and output token use by **−16.58%**, holding task and repo constant. Context files have first-order effects on agent operation, which means modifying them is consequential. We do not have a published study isolating the effect of *auto-generated vs. human-written* preference content, but two factors argue for caution: (i) any change to `SKILL.md` immediately affects every future session, and (ii) auto-generated changes have not had a human in the loop to sanity-check framing, scope, or applicability.
+
+The propose-only model exists because the cost of a bad change is ongoing (every session pays it) while the cost of a missed improvement is only the deferred upside. Asymmetric stakes → asymmetric stance.
 
 `evolve review` should default-reject when uncertain. The user's bar for accepting a proposal should be: *"I can clearly see how this change makes the workflow better, and I can articulate the failure mode that motivated it."* If either is missing, reject.
 
@@ -208,6 +210,8 @@ Original to this repo, but not invented from whole cloth. The architecture match
 Two empirical findings shape the safety design:
 
 - **Negative-constraint backfire** ([Semantic Gravity Wells, arXiv 2601.08070](https://www.arxiv.org/pdf/2601.08070)): negative framing fails 87.5% of the time, with the forbidden behavior receiving 4.4× more attention than positive framing suppresses. → Positive-framing requirement at promotion time.
-- **Auto-generated agent context degrades performance** (Princeton study on AGENTS.md, [asdlc.io](https://asdlc.io/practices/agents-md-spec/)): human-written +4%, auto-generated **-23%** cost / reduced success. → Bias toward rejection at `evolve review` time. Propose-only model is non-negotiable.
+- **Repository-level agent context has first-order effects on agent behavior** ([Lulla et al., arXiv 2601.20404](https://arxiv.org/abs/2601.20404v1), Jan 2026, n=124 PRs): presence of AGENTS.md shifts median runtime by −28.64% and output tokens by −16.58% with comparable task completion. The paper does **not** measure auto-generated vs. human-written content, but it establishes that context files measurably move the agent — which means *changing* them is consequential. → Bias toward rejection at `evolve review` time; propose-only model is non-negotiable.
+
+Author's note: an earlier draft cited a "Princeton study" finding auto-generated AGENTS.md degraded performance by 23%. That figure traced to a third-party blog summary and could not be verified against any peer-reviewed source. The citation was corrected; the principle (auto-modified context warrants human review) survives on the more conservative grounding above.
 
 Calibration choices (thresholds N=1/2/3 by signal strength, >7-days/>5-citations for proposal generation, soft cap 30 / hard cap 60 for `PREFERENCES.md`) are tuned for resilience over speed: a single bad session cannot move the system, but repeated genuine signal does.
