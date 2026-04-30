@@ -2,7 +2,7 @@
 
 A small, opinionated set of [Cursor Agent Skills](https://docs.cursor.com/) for AI-assisted software engineering. Each skill is a directory with a `SKILL.md` file (plus optional reference docs and scripts) that Cursor's agent can invoke when triggered by name or context.
 
-The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your request and right-sizes the workflow — small changes skip phases, large ones run them all. It composes with three sister skills (`grill-with-docs`, `improve-codebase-architecture`, `diagnose`) forked from [`mattpocock/skills`](https://github.com/mattpocock/skills) under MIT.
+The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your request and right-sizes the workflow — small changes skip phases, large ones run them all. It composes with three sister skills (`grill-with-docs`, `improve-codebase-architecture`, `diagnose`) forked from [`mattpocock/skills`](https://github.com/mattpocock/skills) under MIT, plus an original learning system (`evolve-skills`) that captures patterns from your sessions and feeds them back into smart-mode's classifier.
 
 ## Skills
 
@@ -10,6 +10,7 @@ The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your
 - **[grill-with-docs](./grill-with-docs/SKILL.md)** — Grilling session that challenges your plan against the existing domain model, sharpens terminology, and updates `CONTEXT.md` and ADRs inline as decisions crystallize. Used by smart-mode for phases 1–2.
 - **[improve-codebase-architecture](./improve-codebase-architecture/SKILL.md)** — Surface deepening opportunities (refactors that turn shallow modules into deep ones) in an existing codebase. Run every few days as a periodic practice. Smart-mode hands off here for retroactive rescue.
 - **[diagnose](./diagnose/SKILL.md)** — Disciplined diagnosis loop for hard bugs and performance regressions: build a deterministic feedback loop → reproduce → rank 3–5 falsifiable hypotheses → instrument → fix with regression test → post-mortem. Smart-mode hands off here for bug/perf work.
+- **[evolve-skills](./evolve-skills/SKILL.md)** — Tiered learning system that captures friction, corrections, and declared preferences from your sessions, promotes patterns into a curated `PREFERENCES.md`, and queues `SKILL.md` change proposals for your review. Append-only journal + threshold-based pref promotion + propose-only skill edits = grows with the user without going off the rails. Active during every smart-mode session.
 
 ## How they compose
 
@@ -19,24 +20,27 @@ The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your
                                  ▼
                        ┌──────────────────┐
                        │   smart-mode     │
-                       │  (Phase 0:       │
-                       │   classify)      │
-                       └────────┬─────────┘
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        │                       │                       │
-        ▼                       ▼                       ▼
-   build / refactor      bug / perf            architecture rescue
-        │                       │                       │
-        ▼                       ▼                       ▼
-  ┌──────────────┐      ┌──────────────┐      ┌──────────────────┐
-  │ Phase 1+2:   │      │  diagnose    │      │ improve-codebase-│
-  │ grill-with-  │      │              │      │ architecture     │
-  │ docs         │      └──────────────┘      └──────────────────┘
-  └──────┬───────┘
+                       │  (Phase 0:       │      ┌──────────────────────┐
+                       │   classify, ←────reads──┤  evolve-skills       │
+                       │   apply prefs)   │      │  PREFERENCES.md      │
+                       └────────┬─────────┘      └──────────────────────┘
+                                │                          ▲
+                                │                          │
+        ┌───────────────────────┼───────────────────────┐  │ continuous
+        │                       │                       │  │ capture of
+        ▼                       ▼                       ▼  │ strong signals
+   build / refactor      bug / perf            architecture │
+        │                       │              rescue       │
+        ▼                       ▼                       ▼   │
+  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+  │ Phase 1+2:   │      │  diagnose    │      │ improve-     │
+  │ grill-with-  │      │              │      │ codebase-    │
+  │ docs         │      └──────────────┘      │ architecture │
+  └──────┬───────┘                            └──────────────┘
          │
          ▼
   Phase 3 (TDD), 4 (deep modules), 5 (interface) — only the ones Phase 0 selected
+  └──→ Checklist complete → end-of-session reflection writes weak signals to JOURNAL.md
 ```
 
 ## Install
@@ -51,7 +55,10 @@ ln -s ~/skills/smart-mode                    ~/.cursor/skills/smart-mode
 ln -s ~/skills/grill-with-docs               ~/.cursor/skills/grill-with-docs
 ln -s ~/skills/improve-codebase-architecture ~/.cursor/skills/improve-codebase-architecture
 ln -s ~/skills/diagnose                      ~/.cursor/skills/diagnose
+ln -s ~/skills/evolve-skills                 ~/.cursor/skills/evolve-skills
 ```
+
+`evolve-skills` will bootstrap `~/.cursor/skills-journal/` (its data store) on first use. That directory is local-only and never committed to this repo. You can opt in to private cross-machine sync by adding a private remote: `cd ~/.cursor/skills-journal && git remote add origin <your-private-url>`.
 
 Restart Cursor (or start a new agent session) to pick up new skills.
 
@@ -75,10 +82,22 @@ skills/
 │   ├── DEEPENING.md
 │   ├── INTERFACE-DESIGN.md
 │   └── LANGUAGE.md
-└── diagnose/
-    ├── SKILL.md
-    └── scripts/
-        └── hitl-loop.template.sh
+├── diagnose/
+│   ├── SKILL.md
+│   └── scripts/
+│       └── hitl-loop.template.sh
+└── evolve-skills/
+    └── SKILL.md
+```
+
+`evolve-skills` has no supporting files in the repo because all its data lives in the local-only `~/.cursor/skills-journal/`:
+
+```
+~/.cursor/skills-journal/             (LOCAL ONLY — never committed to this public repo)
+├── JOURNAL.md                        (append-only; agent writes; you can read or edit)
+├── PREFERENCES.md                    (curated; auto-updated under threshold rules; smart-mode reads at Phase 0)
+├── proposals/                        (pending SKILL.md change proposals; you approve via `evolve review`)
+└── .git/                             (revertable history; optional private remote for sync)
 ```
 
 Each `SKILL.md` declares its trigger conditions in YAML frontmatter:
@@ -95,4 +114,4 @@ disable-model-invocation: true   # only loads when explicitly named
 
 `grill-with-docs/`, `improve-codebase-architecture/`, and `diagnose/` are forked verbatim from [`mattpocock/skills`](https://github.com/mattpocock/skills) under MIT. Each forked `SKILL.md` carries a `Source` footer linking to its upstream location. The upstream copyright notice is preserved in this repo's [`LICENSE`](./LICENSE).
 
-`smart-mode/` is original, but heavily inspired by Pocock's framework — particularly the architecture vocabulary (module / interface / seam / adapter / depth / leverage / locality), the four-failure-modes framing in his repo's README, and the vertical-slice TDD pattern.
+`smart-mode/` and `evolve-skills/` are original to this repo, but `smart-mode/` is heavily inspired by Pocock's framework — particularly the architecture vocabulary (module / interface / seam / adapter / depth / leverage / locality), the four-failure-modes framing in his repo's README, and the vertical-slice TDD pattern.
