@@ -2,7 +2,7 @@
 
 A small, opinionated set of [Cursor Agent Skills](https://docs.cursor.com/) for AI-assisted software engineering. Each skill is a directory with a `SKILL.md` file (plus optional reference docs and scripts) that Cursor's agent can invoke when triggered by name or context.
 
-The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your request and right-sizes the workflow — small changes skip phases, large ones run them all. It composes with three sister skills (`grill-with-docs`, `improve-codebase-architecture`, `diagnose`) forked from [`mattpocock/skills`](https://github.com/mattpocock/skills) under MIT, plus two original learning systems: `evolve-skills` (adapts the agent to you — captures patterns from your sessions and feeds them back into smart-mode's classifier) and `stay-sharp` (keeps you sharp as the agent scales — captures competency signals and intervenes with commit-first quizzes when you defer on topics you've marked as must-know).
+The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your request and right-sizes the workflow — small changes skip phases, large ones run them all. It composes with three sister skills (`grill-with-docs`, `improve-codebase-architecture`, `diagnose`) forked from [`mattpocock/skills`](https://github.com/mattpocock/skills) under MIT, plus three original additions: `evolve-skills` (adapts the agent to you — captures patterns from your sessions and feeds them back into smart-mode's classifier), `stay-sharp` (keeps you sharp as the agent scales — captures competency signals and intervenes with commit-first quizzes when you defer on topics you've marked as must-know), and `innovate-mode` (the upstream companion to smart-mode — turns abstract, open-ended visions into concrete, executable plans that smart-mode can then build).
 
 ## Skills
 
@@ -12,37 +12,40 @@ The headline skill is **`smart-mode`**, an orchestrator that scope-assesses your
 - **[diagnose](./diagnose/SKILL.md)** — Disciplined diagnosis loop for hard bugs and performance regressions: build a deterministic feedback loop → reproduce → rank 3–5 falsifiable hypotheses → instrument → fix with regression test → post-mortem. Smart-mode hands off here for bug/perf work.
 - **[evolve-skills](./evolve-skills/SKILL.md)** — Tiered learning system that captures friction, corrections, and declared preferences from your sessions, promotes patterns into a curated `PREFERENCES.md`, and queues `SKILL.md` change proposals for your review. Append-only journal + threshold-based pref promotion + propose-only skill edits = grows with the user without going off the rails. Active during every smart-mode session.
 - **[stay-sharp](./stay-sharp/SKILL.md)** — Sister skill to `evolve-skills`, pointed in the opposite direction: keeps the **user** sharp as LLM-assisted coding scales output. Captures competency signals (topic frequency, deferrals, thrashing, debugging cycles, concept misuse, vibes-driven decisions) into a shared journal; intervenes with commit-first quizzes when you defer on a topic you've classified as `must-know` in your tier list. User-curated tier list (`must-know` / `should-know` / `aware-of`) gates which interventions fire. Active during every smart-mode session.
+- **[innovate-mode](./innovate-mode/SKILL.md)** — Upstream companion to `smart-mode`: turns an abstract, open-ended vision (*"build AGI from scratch"*, *"rethink how X works"*) into a concrete plan with phases, milestones, and a first leaf scoped well enough to hand to smart-mode. Structured as a **capabilities catalog** the agent composes meta-ly — reframing, decomposition, critique-and-revise, parallel diverge-converge with persona'd workers, tree-search-and-prune, concretization-check, handoff — rather than a fixed phase order. Phase 0 triages the session shape (vision-pass / first-milestone / stay-resident). Active across the loop: `evolve-skills` + `stay-sharp`. Triggered by saying *"innovate mode"*.
 
 ## How they compose
 
 ```
-                       (you say "smart mode")
-                                 │
-                                 ▼
-                       ┌──────────────────┐
-                       │   smart-mode     │      ┌──────────────────────┐
-                       │  (Phase 0:       │ ←──reads──┤ evolve-skills        │
-                       │   classify,      │      │ PREFERENCES.md       │
-                       │   apply prefs    │      └──────────────────────┘
-                       │   + topic tiers) │                  ▲
-                       │                  │ ←──reads──┐      │ continuous capture
-                       └────────┬─────────┘           │      │ of strong signals
-                                │              ┌─────┴─────────┐
-        ┌───────────────────────┼─────────┐    │ stay-sharp    │
-        │                       │         │    │ MUST-KNOW.md  │
-        ▼                       ▼         ▼    └───────┬───────┘
-   build / refactor      bug / perf    architecture    │
-        │                       │       rescue         │ continuous capture
-        ▼                       ▼         ▼            │ of competency signals
-  ┌──────────────┐      ┌──────────────┐  ┌──────────────┐  │ + commit-first
-  │ Phase 1+2:   │      │  diagnose    │  │ improve-     │  │ quizzes on
-  │ grill-with-  │      │              │  │ codebase-    │  │ must-know deferrals
-  │ docs         │      └──────────────┘  │ architecture │  │
-  └──────┬───────┘                        └──────────────┘  │
-         │                                                  │
-         ▼                                                  │
-  Phase 3 (TDD), 4 (deep modules), 5 (interface) — only the ones Phase 0 selected
-  └──→ Checklist complete → both sister skills write end-of-session reflections
+       (you say "innovate mode")           (you say "smart mode")
+                  │                                  │
+                  ▼                                  ▼
+       ┌──────────────────────┐            ┌──────────────────┐
+       │   innovate-mode      │            │   smart-mode     │      ┌──────────────────────┐
+       │  (Phase 0 triage:    │  hands ──▶ │  (Phase 0:       │ ←──reads──┤ evolve-skills        │
+       │   stopping criterion │   off a    │   classify,      │      │ PREFERENCES.md       │
+       │   × state × clarity) │  scoped    │   apply prefs    │      └──────────────────────┘
+       │                      │   leaf     │   + topic tiers) │                  ▲
+       │  composes capability │            │                  │ ←──reads──┐      │ continuous capture
+       │  primitives meta-ly: │            └────────┬─────────┘           │      │ of strong signals
+       │  - reframe           │                     │              ┌─────┴─────────┐
+       │  - decompose         │     ┌───────────────┼─────────┐    │ stay-sharp    │
+       │  - critique          │     │               │         │    │ MUST-KNOW.md  │
+       │  - diverge-converge  │     ▼               ▼         ▼    └───────┬───────┘
+       │  - tree-search       │  build /       bug / perf    architecture  │
+       │  - persona-adoption  │  refactor          │         rescue        │ continuous capture
+       │  - worker-spawning   │     │               │           │           │ of competency signals
+       │  - research-synth    │     ▼               ▼           ▼           │ + commit-first
+       │  - concretize-check  │┌──────────────┐ ┌──────────┐ ┌──────────┐   │ quizzes on
+       │  - handoff           ││ Phase 1+2:   │ │ diagnose │ │ improve- │   │ must-know deferrals
+       └──────────┬───────────┘│ grill-with-  │ │          │ │ codebase-│   │
+                  │            │ docs         │ └──────────┘ │ arch.    │   │
+                  │            └──────┬───────┘              └──────────┘   │
+                  │                   │                                     │
+                  └─ also reads ──────┼─ PREFERENCES.md (Innovate-mode)     │
+                                      ▼                                     │
+                Phase 3 (TDD), 4 (deep modules), 5 (interface) ─ only the ones Phase 0 selected
+                └──→ Checklist complete → both sister skills write end-of-session reflections
 ```
 
 ## Install
@@ -59,6 +62,7 @@ ln -s ~/skills/improve-codebase-architecture ~/.cursor/skills/improve-codebase-a
 ln -s ~/skills/diagnose                      ~/.cursor/skills/diagnose
 ln -s ~/skills/evolve-skills                 ~/.cursor/skills/evolve-skills
 ln -s ~/skills/stay-sharp                    ~/.cursor/skills/stay-sharp
+ln -s ~/skills/innovate-mode                 ~/.cursor/skills/innovate-mode
 ```
 
 `evolve-skills` and `stay-sharp` share `~/.cursor/skills-journal/` as their data store; `evolve-skills` bootstraps the directory on first use, and `stay-sharp` adds two sibling files (`COMPETENCY-JOURNAL.md` and `MUST-KNOW.md`). The whole directory is local-only and never committed to this repo. You can opt in to private cross-machine sync by adding a private remote: `cd ~/.cursor/skills-journal && git remote add origin <your-private-url>`.
@@ -92,8 +96,12 @@ skills/
 │       └── hitl-loop.template.sh
 ├── evolve-skills/
 │   └── SKILL.md
-└── stay-sharp/
-    └── SKILL.md
+├── stay-sharp/
+│   └── SKILL.md
+└── innovate-mode/
+    ├── SKILL.md
+    ├── CAPABILITIES.md          (per-primitive recipes; read on demand)
+    └── PLAN-FORMAT.md           (VISION.md / INNOVATE.md / doc-tree templates)
 ```
 
 `evolve-skills` and `stay-sharp` have no supporting files in the repo because all their data lives in the local-only `~/.cursor/skills-journal/`:
@@ -122,4 +130,4 @@ disable-model-invocation: true   # only loads when explicitly named
 
 `grill-with-docs/`, `improve-codebase-architecture/`, and `diagnose/` are forked verbatim from [`mattpocock/skills`](https://github.com/mattpocock/skills) under MIT. Each forked `SKILL.md` carries a `Source` footer linking to its upstream location. The upstream copyright notice is preserved in this repo's [`LICENSE`](./LICENSE).
 
-`smart-mode/`, `evolve-skills/`, and `stay-sharp/` are original to this repo, but `smart-mode/` is heavily inspired by Pocock's framework — particularly the architecture vocabulary (module / interface / seam / adapter / depth / leverage / locality), the four-failure-modes framing in his repo's README, and the vertical-slice TDD pattern.
+`smart-mode/`, `evolve-skills/`, `stay-sharp/`, and `innovate-mode/` are original to this repo. `smart-mode/` is heavily inspired by Pocock's framework — particularly the architecture vocabulary (module / interface / seam / adapter / depth / leverage / locality), the four-failure-modes framing in his repo's README, and the vertical-slice TDD pattern. `innovate-mode/` borrows smart-mode's spine (Phase 0 triage, capabilities-not-workflow framing, evolve-skills + stay-sharp integration, pre-flight checklist) and builds on Ousterhout's *Design It Twice* for its diverge-converge primitive.
