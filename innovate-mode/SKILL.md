@@ -1,7 +1,6 @@
 ---
 name: innovate-mode
 description: Take an abstract, open-ended, ambitious vision and progressively materialize it into a concrete plan with phases, milestones, and tangible next steps that downstream skills (smart-mode, etc.) can execute. Capabilities catalog the agent composes meta-ly — not a fixed workflow. Use when the user says "innovate mode", "engage innovate mode", or brings an open-ended vision (e.g. "build AGI from scratch", "rethink how X works", "I have this fuzzy idea I want to make real") and needs help turning it into a plan.
-disable-model-invocation: true
 ---
 
 # Innovate Mode

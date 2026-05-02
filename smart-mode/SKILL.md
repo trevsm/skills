@@ -1,7 +1,6 @@
 ---
 name: smart-mode
 description: Engage a disciplined design-first workflow for AI-assisted software engineering. Right-sizes the workflow to the request (Phase 0 triages first; small changes skip phases, large ones run them all). Treats code as a critical asset; the user is the strategic architect, the agent is the tactical programmer. Use when the user says "smart mode", "engage smart mode", or asks for a rigorous, design-first approach to building with AI.
-disable-model-invocation: true
 ---
 
 # Smart Mode

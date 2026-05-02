@@ -1,7 +1,6 @@
 ---
 name: stay-sharp
 description: Tracks user-side competency signals during engineering sessions (topic frequency, deferrals, thrashing, debugging cycles, concept misuse, vibes-driven decisions) to fight skill atrophy from LLM-assisted coding. Maintains a user-curated topic tier list (`must-know` / `should-know` / `aware-of`); intervenes with commit-first quizzes when deferring on must-know topics. Active during every smart-mode session; invoke directly with `stay-sharp review`, `quiz me on <topic>`, `i know this`, `tier <topic> as <bucket>`, or `stay-sharp status`.
-disable-model-invocation: true
 ---
 
 # Stay Sharp
