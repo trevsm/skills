@@ -44,23 +44,13 @@ This is *why* the workflow exists. Each phase prevents one of these.
 
 If you can name which failure mode you're guarding against, you know which phase you actually need.
 
-## Vocabulary (use these terms, not substitutes)
+## Vocabulary
 
-Use this vocabulary exactly. Full definitions in [LANGUAGE.md](LANGUAGE.md).
+Definitions, anti-aliases, and the three load-bearing tests live in **[LANGUAGE.md](LANGUAGE.md)** — read it once; it's the contract for the rest of this skill.
 
-- **Module** — anything with an interface and an implementation. _Not_: unit, component, service.
-- **Interface** — everything a caller must know to use the module: types, invariants, ordering, error modes, required config. _Not_: signature, API.
-- **Implementation** — the code inside.
-- **Depth** — leverage at the interface. **Deep** = a lot of behavior behind a small interface. **Shallow** = interface nearly as complex as implementation.
-- **Seam** — where an interface lives; a place behavior can be altered without editing in place. _Not_: boundary.
-- **Adapter** — a concrete thing satisfying an interface at a seam.
-- **Leverage** — what callers get from depth. **Locality** — what maintainers get from depth.
+Quick reference for the terms used throughout: **module · interface · implementation · depth · seam · adapter · leverage · locality**. Avoid drift into "component," "service," "API," "boundary," or "signature."
 
-Three tests applied throughout:
-
-- **Deletion test** — imagine deleting the module. If complexity vanishes, it was a pass-through. If complexity reappears across N callers, it was earning its keep.
-- **The interface is the test surface.** If you want to test past the interface, the module is the wrong shape.
-- **One adapter = hypothetical seam. Two adapters = real seam.** Introduce a port only when something actually varies across it.
+The three tests referenced repeatedly below: **deletion test · interface-is-test-surface · two-adapters-make-a-real-seam**.
 
 ---
 
@@ -85,32 +75,36 @@ Read the request and (if needed) explore the codebase. Then classify on four axe
 | **Reversibility** | easy-to-undo · load-bearing · irreversible |
 | **Novelty** | boilerplate · follows-existing-pattern · novel |
 
-### Decide
+### Decide — pick a profile
 
-Map the classification to phases using this table. Skip whatever isn't required.
+Phase 0's output is **a single profile name**. The four-axis classification is the derivation; the profile is the commitment.
 
-| Size & type | P1 Grill | P2 Glossary | P3 TDD | P4 Deep modules | P5 Interface | Notes |
-|---|---|---|---|---|---|---|
-| **Trivial** / docs / config | skip | skip | skip | — | — | Just do the change. |
-| **Surgical** bug or perf | — | reuse existing | — | — | — | **Hand off to `../diagnose/`.** |
-| **Surgical** refactor | light (1–2 Qs max) | reuse | regression test only | — | — | |
-| **Small feature** | brief | reuse + extend if needed | yes | only if a new module is justified | light | |
-| **New feature / module** | full Phase 1 | full Phase 2 | full vertical-slice loop | yes | full | |
-| **System / architectural** | full | full + multi-context | full | yes | Design-It-Twice | Most rigor. |
+| Profile | Phases that run | Use for |
+|---|---|---|
+| `quick` | none — just do the change | Typo, doc edit, config tweak, comment. |
+| `surgical` | P1 (light, 1–3 Qs) · P2 (reuse glossary) · P3 (regression test only, if touching tested code) | Bounded refactor in one place; single small change. |
+| `feature` | P1 (brief) · P2 (reuse + extend) · P3 (full TDD) · P5 (light) — and P4 only if a new module is genuinely justified | New functionality; usually one or two modules touched. |
+| `architectural` | P1 (full) · P2 (full) · P3 (full) · P4 (full) · P5 (full, with Design-It-Twice on contested interfaces) | New system, multi-module change, contested interfaces. |
+| `bug-handoff` | exit smart-mode → invoke [`../diagnose/SKILL.md`](../diagnose/SKILL.md) | Bug or performance investigation. |
+| `rescue-handoff` | exit smart-mode → invoke [`../improve-codebase-architecture/SKILL.md`](../improve-codebase-architecture/SKILL.md) | Retroactive deepening of an existing shallow codebase. |
 
-When the **reversibility** column is _load-bearing_ or _irreversible_, escalate one row of rigor regardless of size. Novel work in any size class warrants more Phase 5 attention than boilerplate.
+The level words (`light` / `brief` / `full` for grilling, `reuse` / `extend` / `full` for glossary, etc.) are defined inside each phase section — the profile just names which level applies.
 
-### Announce (unless trivial)
+**Escalate one tier** when reversibility is `load-bearing` or `irreversible`, or when novelty is `novel` and the profile would otherwise be `surgical` or below. (`surgical → feature`, `feature → architectural`.)
 
-For anything above _trivial_, emit one line before proceeding. Include any preferences from `PREFERENCES.md` that **changed** the classification or selected phases:
+### Announce (unless `quick`)
 
-> *"Reading this as a {size} {type} {reversibility}. Applied preference: {one preference, only if it affected the decision}. Will apply phases {X, Y, Z}; skipping {A, B}. Reason: {one-line}. Adjust?"*
+For any profile above `quick`, emit one line before proceeding:
 
-If no preferences applied, omit that clause entirely.
+> *"Phase 0: `feature`. Will run P1 brief, P2 extend, P3 full TDD, P5 light; skipping P4. Adjust?"*
 
-For _trivial_ work, just do it — no announcement needed.
+Only mention a preference from `PREFERENCES.md` when it actually changed the profile:
 
-If the user says "just do it" → skip even the announcement and execute. If they want more rigor → escalate. If they want less → de-escalate to the next row down. The user's word overrides the matrix.
+> *"Phase 0: `surgical` (preference `prefer surgical for changes ≤30 LoC` applied; this is ~25 LoC). Adjust?"*
+
+For `quick`, just do the change — no announcement.
+
+If the user says "just do it" → drop one tier and execute silently. If they want more rigor → escalate one tier. **The user's word overrides the profile.** If a later phase reveals you misclassified, return to Phase 0 and announce the new profile before continuing.
 
 ---
 
@@ -186,6 +180,18 @@ RIGHT (vertical):
   ...
 ```
 
+**Worked example.** Adding a points/streaks gamification feature to a course platform.
+
+*Horizontal (wrong):* the agent writes all schema migrations first, then all service methods, then all UI. Nothing is exercisable end-to-end until the third pass; the first integration bug surfaces hours in.
+
+*Vertical (right) — first cycle:*
+
+1. **RED:** `awardPoints("user-1", "lesson-completed").totalPoints === 10`
+2. **GREEN:** add the `points_events` table migration, write the minimal `awardPoints()` body, render a `Points: 10` pill on the dashboard.
+3. **Refactor:** none yet.
+
+One slice has touched the schema, the service, *and* the UI. The next cycle adds streaks; the one after adds level thresholds. Each is fully exercisable end-to-end. You can ship after slice one if you have to — that is what makes it a tracer.
+
 **Per cycle:**
 
 - **RED:** write one failing test for the next behavior. Use glossary vocabulary in the test name. Test through the public interface only.
@@ -227,12 +233,7 @@ Deep module                       Shallow module (avoid)
 - Internal seams (private to a module's implementation, used by its own tests) stay private to the implementation — they remain absent from the public interface.
 - Resist premature extraction. Wait for real duplication or a real seam.
 
-**Classify dependencies** (drives test strategy and adapter shape) — see `LANGUAGE.md` for full descriptions:
-
-1. **In-process** — pure computation. Always deepenable; no adapter needed.
-2. **Local-substitutable** — has a local stand-in (PGLite, in-memory FS). Internal seam.
-3. **Remote-but-owned** — your own services across a network. Define a port; production HTTP/gRPC adapter, in-memory test adapter.
-4. **True external** — third-party services. Inject as a port; mock adapter in tests.
+**Classify the module's dependencies** (`in-process` · `local-substitutable` · `remote-but-owned` · `true-external`) — the category drives test strategy and adapter shape. See [LANGUAGE.md § Dependency Categories](LANGUAGE.md) for the definitions and adapter recipes.
 
 ### File hygiene (forward-pressure during generation)
 
@@ -274,6 +275,26 @@ The interface includes types, invariants, ordering constraints, error modes, and
 4. Tests must survive internal refactors.
 
 If the user has not specified an interface, return to Phase 1 and grill them on it.
+
+**Worked example — interface sketch before implementation.** For the gamification module, the interface (the thing callers and tests see) is sketched first:
+
+```ts
+type GamificationService = {
+  awardPoints(userId: UserId, source: PointSource, ref: EventRef): Promise<PointsResult>
+  getProfile(userId: UserId): Promise<Profile>  // points, level, streak
+}
+
+type PointSource = "lesson-completed" | "quiz-passed"
+type PointsResult = { totalPoints: number; leveledUp: boolean; newLevel?: Level }
+```
+
+Invariants — part of the interface even though the type signature can't carry them:
+
+- `awardPoints` is **idempotent** per `(userId, source, ref)` — re-emitting the same event does not double-credit.
+- Level transitions are **monotonic**; once a user has reached a level, their level never decreases.
+- Errors throw `GamificationError` (typed); transient I/O failures are retried inside the service, not the caller's problem.
+
+Tests are written against this surface — never against `points_events` rows or internal helpers. The implementation can be rewritten (Postgres → Redis, in-memory → CRDT) and the tests still pass. **The interface is the contract; the implementation is replaceable.**
 
 ### Opt-in: Design It Twice (parallel sub-agents)
 
