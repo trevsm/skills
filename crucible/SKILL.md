@@ -1,9 +1,7 @@
 ---
-
-## name: crucible
-
+name: crucible
 description: Vertical-slice test-driven development for prose claims. Hardens a thesis against adversarial objections one cycle at a time using adversary, proponent, and judge subagents; produces a regression-checkable transcript of which objections the thesis has survived. Use when the user says "crucible this thesis", "put this through the crucible", "engage crucible", "harden this argument", "stress-test this claim", "tdd this argument", or wants to subject a load-bearing technical, strategic, policy, or philosophical claim to the same RED/GREEN/refactor discipline as smart-mode's Phase 3.
-disable-model-invocation: false
+---
 
 # Crucible
 
