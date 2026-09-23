@@ -358,6 +358,7 @@ Do this:
    - The root is the real question. It depends on the pieces needed to answer it.
    - Settle terms and premises first. When a definition or a factual premise changes the answer to other pieces, make it a piece they depend on.
    - When two pieces need the same thing, make that thing one piece both depend on. Never duplicate it.
+   - A piece is small enough that one serious objection has a single target. Two claims that could fail separately are two pieces. Do not pre-build the strongest case for keeping a claim. The piece that is about to affirm or deny it will ask for that.
    - Leaves are small enough for one careful agent to settle in one pass.
    - Mark each piece kind "fact" (findable, checkable) or "judgment" (a weighing or decision). Use judgment sparingly for leaves.
    - Between {MIN_FRAMED} and {MAX_FRAMED} pieces including the root, at most {led['caps']['max_depth']} levels deep, no cycles.
@@ -424,12 +425,17 @@ def node_prompt(led, run, n):
         "If you cannot answer well without something you do not have, name that instead of guessing.\n"
         "If something you were given looks wrong, say what and why.\n"
         "If this is the wrong question, say what should have been asked, and why.\n"
+        "If your question contains two claims that could fail separately, do not answer the bundle. Name each claim as something that has to be settled first.\n"
+        "If you are about to affirm or deny a contested claim, and nothing already settled states the strongest account on which that claim still holds, do not invent that account and then defeat it. Name one piece that has to be settled first: the single strongest rescue, in the defender's terms, with no verdict. You answer it on your next pass.\n"
+        "If your own question is only to state that rescue, state it and stop. Do not verdict the claim, and do not ask for a rescue of the rescue.\n"
     )
     if role == "integrator":
         parts.append(
             "\nYou are building on answers that are already settled. Check each one first: does it answer what you need, "
-            "and does it hold up? Say so if one does not. Then do the thinking this level needs. Resolve the tensions, "
-            "weigh them, and decide. Do not just restate the answers under you.\n"
+            "and does it hold up? A claim holds up only if it answered the rescue it was given, not a weaker objection. "
+            "Say so if one does not. Then do the thinking this level needs. Your own rescue, if you need one, is only against "
+            "the inference you are drawing from those answers. Do not re-open a claim that already answered its rescue. "
+            "Resolve the tensions, weigh them, and decide. Do not just restate the answers under you.\n"
         )
     if n["force"] or led["converge"]:
         parts.append("\nThe budget is closing. You must settle your piece now. State your assumptions instead of asking for more.\n")
@@ -466,7 +472,7 @@ def matcher_prompt(led, run, jid, needs):
 
 Same means settling the existing piece would give the requester what it needs. Close but different is new. When two requests ask for the same new thing, make one new piece and point the other request at it with same_as.
 
-Some requests can only be answered by the person who asked the question: their own data, logs, contracts, or customer conversations. No agent can settle those. Mark them reader. The requester proceeds on a stated assumption, and the final answer tells the reader to check that fact and how it would change the answer. Only mark reader when the fact truly cannot be reasoned about or looked up.
+Some requests can only be answered by the person who asked the question: their own data, logs, contracts, or customer conversations. No agent can settle those. Mark them reader. The requester proceeds on a stated assumption, and the final answer tells the reader to check that fact and how it would change the answer. Only mark reader when the fact truly cannot be reasoned about or looked up. A request for the strongest account on which a claim still holds is a normal piece. State that account, with no verdict. Do not mark it reader.
 
 The question being worked:
 {led['question']}
@@ -516,6 +522,7 @@ ANSWER_RULES = """Answer rules:
 - Name the riskiest thing you recommend and why it fits the constraints.
 - Simplest version that works. Cut any step, gate, or role that would not change a decision.
 - No bookkeeping. No piece ids, and no mention of agents, pieces, the process, or how the answer was produced.
+- Do not fold claims that can fail separately back into one yes or no. Keep a rescue that survived attached to the claim it answers.
 - End with "## What would change this": the facts only the reader can check, and how each would change the answer.
 
 Template:

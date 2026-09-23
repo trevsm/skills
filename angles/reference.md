@@ -40,6 +40,8 @@ The script `scripts/angles.py` owns the ledger, the graph, the budget, and every
  "reject": [{"id": "Q-5", "reason": "..."}]}
 ```
 
+A piece that is about to affirm or deny a contested claim, without a settled rescue under it, returns blocked with one need: the strongest account on which the claim still holds, in the defender's terms, with no verdict. A piece whose question is only that account states it and does not ask for a further rescue. A piece that still bundles two claims that could fail separately returns blocked and names those claims instead of answering the bundle.
+
 What the script does with it, in this order:
 
 1. **reject** a settled dependency: that dependency goes back with the objection, and this piece waits and reruns with its earlier work. Each piece can be sent back once. Rejects are ignored while converging.
