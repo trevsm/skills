@@ -1,57 +1,66 @@
 #!/usr/bin/env python3
-"""Ledger and prompt builder for the angles harness. Python 3 standard library only.
+"""Whiteboard for the angles harness. Python 3 standard library only.
 
-The planner calls one command per step. Each command checks the ledger, applies
-the caps, writes the ledger atomically, and prints the next action.
+A run is a graph of questions. A framer pins down terms and lays out the graph.
+Pieces are settled bottom-up: a piece runs once everything it depends on is
+settled, and it can send a weak dependency back, ask for a missing one, or say
+its own question is framed wrong. A matcher links new requests to pieces that
+already exist, so a shared dependency is settled once. A writer turns the
+settled graph into the answer, a challenger attacks it, and a reviser fixes it.
+
+Agents write their own replies to returns/<id>.md. The planner only runs the
+next command, launches what it prints, and ingests. Every command checks the
+ledger, applies the budget, writes the ledger atomically, and prints Next.
 """
 
 import argparse
 import datetime as dt
 import json
-import math
 import os
 import re
-import string
+import shutil
 import sys
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve()
-MODEL = "composer-2.5-fast"
 AGREEMENT = "Agreement among nodes is not evidence."
-MAX_LEADS = 3
-MAX_WORKERS = 3
-MAX_CHILDREN_PER_PARENT = 3
-MAX_NEW_ITEMS_PER_WAVE = 6
-MAX_PLAN_ITEMS = 6
-MAX_CRITERIA = 6
-MAX_FINDINGS = 6
-MAX_OPEN_ITEMS = 3
-MAX_ATTEMPTS = 2
-STALL_LIMIT = 2
-MIN_WAVE_BUDGET = 6
-DEFAULT_WAVES = 4
-DEFAULT_AGENTS = 48
-STOPWORDS = frozenset(
-    "a an the of to and or for in on with by from that this is are was were be as at if we they it".split()
-)
+DEFAULT_CHEAP = "composer-2.5-fast"
+DEFAULT_STRONG = "claude-opus-5-5-high"
+BASE_COST = {"composer-2.5-fast": 0.25, "claude-opus-5-5-high": 0.40}
+UNKNOWN_COST = 0.40
+ROLE_WEIGHT = {
+    "framer": 1.5,
+    "leaf": 1.0,
+    "integrator": 1.0,
+    "matcher": 0.5,
+    "writer": 1.5,
+    "challenger": 1.0,
+    "reviser": 1.0,
+}
+STRONG_ROLES = ("framer", "integrator", "matcher", "writer", "challenger", "reviser")
+ENDGAME = (("W1", "writer"), ("X1", "challenger"), ("W2", "reviser"))
+DEFAULT_BUDGET = 8.0
+DEFAULT_MAX_NODES = 24
+DEFAULT_MAX_DEPTH = 5
+MIN_FRAMED, MAX_FRAMED = 3, 14
+MAX_PARALLEL = 6
+MAX_FAILURES = 2
+MAX_DISPATCHES = 4
+MAX_REOPENS = 1
+MAX_REFRAMES = 1
+KINDS = ("fact", "judgment")
 CONFIDENCE = ("low", "medium", "high")
-SOURCE_KINDS = ("measured", "sourced", "estimate", "assumption", "reasoning")
-MAX_CONSTRAINTS = 8
-CRITERION_STATUS = ("open", "met", "unmeetable")
 SEVERITY = ("breaks", "weakens", "ok")
-ITEM_STATUS = ("frontier", "dispatched", "done", "failed", "dropped")
-PHASES = ("planning", "waves", "challenge", "synthesize", "done")
-CAP_REFUSALS = ("depth_exhausted", "breadth_cap", "layer_cap")
-AUDIT_HEADINGS = ("## Claim map", "## Challenge", "## Open questions")
-ANSWER_REQUIRED_HEADING = "## Assumptions"
+PHASES = ("framing", "working", "writing", "challenging", "revising", "finishing", "done")
+SETTLED = ("resolved", "failed")
+ANSWER_REQUIRED_HEADINGS = ("## Assumptions", "## What would change this")
 ANSWER_BANNED = (
-    (r"\b[TX]\d+(-w\d+)?\b", "branch or challenger ids"),
-    (r"\bC\d+\b", "criterion ids"),
-    (r"(?im)^#+\s*(coverage|criteria|challenge|run|divergences|claim map)\b", "an audit heading"),
-    (r"(?i)\bcriteri(on|a) (met|partial|unmeetable)\b", "criteria bookkeeping"),
-    (r"(?i)\b(the challenger|challenge pass|review pass|branch lead|planner|ledger|notes file)\b", "harness vocabulary"),
+    (r"\bQ-\d+\b", "piece ids"),
+    (r"\b(F1|M\d+|W[12]|X1)\b", "agent ids"),
+    (r"(?im)^#+\s*(claim map|graph|challenge|run|audit|terms used)\b", "an audit heading"),
+    (r"(?i)\b(the framer|the matcher|integrator|the challenger|the reviser|ledger|notes file|whiteboard)\b", "harness vocabulary"),
     (r"(?i)\bangles\b", "the harness name"),
-    (r"(?i)\bwaves? \d", "wave numbers"),
+    (r"(?i)\b(this|the) run\b", "talk about the run"),
 )
 
 
@@ -63,29 +72,20 @@ def now():
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def claim_key(text):
-    return re.sub(r"\s+", " ", str(text).strip().lower()).rstrip(".?! ")
-
-
-def token_key(text):
-    tokens = re.findall(r"[a-z0-9$%]+", claim_key(text))
-    return " ".join(sorted({t for t in tokens if t not in STOPWORDS}))
-
-
-def id_number(item_id):
-    digits = re.sub(r"\D", "", str(item_id))
-    return int(digits) if digits else 0
-
-
-def as_text(value, limit):
+def text_of(value, limit):
     if value is None:
         return ""
-    return str(value).strip()[:limit]
+    return re.sub(r"\s+", " ", str(value)).strip()[:limit]
 
 
-def criterion_id(value):
-    s = str(value).strip().upper()
-    return f"C{s}" if s.isdigit() else s
+def short(value, limit=220):
+    s = text_of(value, 100000)
+    if len(s) <= limit:
+        return s
+    cut = s[: limit - 1]
+    if " " in cut[limit // 2 :]:
+        cut = cut[: cut.rindex(" ")]
+    return cut.rstrip(" ,;:") + "…"
 
 
 def run_path(run):
@@ -110,557 +110,1166 @@ def save(run, led):
     os.replace(tmp, path)
 
 
-def read_input(path):
+def read_file(path):
     p = Path(path).expanduser()
     if not p.exists():
         raise HarnessError(f"missing file {p}")
     return p.read_text()
 
 
-def extract_json(text):
-    text = text.strip()
-    candidates = [text]
-    candidates += [m.group(1) for m in re.finditer(r"```(?:json)?\s*\n(.*?)```", text, re.S)]
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
+def parse_reply(text):
+    """Split a reply into its JSON header and free-prose body."""
+    text = text.lstrip("\ufeff").strip()
+    fence = re.match(r"```(?:json)?\s*\n(.*?)\n```", text, re.S)
+    if fence:
+        raw, body = fence.group(1), text[fence.end() :]
+    else:
+        start = text.find("{")
+        if start == -1:
+            raise HarnessError("reply has no JSON header")
         try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    raise HarnessError("no JSON object found")
+            _, end = json.JSONDecoder().raw_decode(text[start:])
+        except json.JSONDecodeError as e:
+            raise HarnessError(f"reply header is not valid JSON: {e}")
+        raw, body = text[start : start + end], text[start + end :]
+    try:
+        header = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HarnessError(f"reply header is not valid JSON: {e}")
+    if not isinstance(header, dict):
+        raise HarnessError("reply header must be a JSON object")
+    return header, body.strip()
 
 
-def challenge_reserve(max_agents):
-    if max_agents >= 12:
-        return 3
-    if max_agents >= 6:
-        return 2
-    return 0
+def cost_of(led, role, kind=None):
+    model = model_for(led, role, kind)
+    return round(BASE_COST.get(model, UNKNOWN_COST) * ROLE_WEIGHT[role], 3)
+
+
+def model_for(led, role, kind=None):
+    if role == "leaf" and kind != "judgment":
+        return led["models"]["cheap"]
+    if role in STRONG_ROLES or role == "leaf":
+        return led["models"]["strong"]
+    return led["models"]["cheap"]
+
+
+def endgame_left(led):
+    return sum(cost_of(led, role) for jid, role in ENDGAME if jid not in led["jobs"] and jid not in led["flight"])
 
 
 def available(led):
-    agents = led["agents"]
-    reserve = led["caps"]["challenge_reserve"] if led["challenge"] is None else 0
-    return led["caps"]["max_agents"] - agents["spent"] - agents["reserved"] - reserve
+    return led["budget"]["limit"] - led["budget"]["spent"] - led["budget"]["reserved"] - endgame_left(led)
 
 
-def get_item(led, item_id):
-    for it in led["items"]:
-        if it["id"] == item_id:
-            return it
-    raise HarnessError(f"unknown item {item_id}")
+def node(led, nid):
+    if nid not in led["nodes"]:
+        raise HarnessError(f"unknown piece {nid}")
+    return led["nodes"][nid]
 
 
-def open_criteria(led):
-    return {c["id"] for c in led["criteria"] if c["status"] == "open"}
-
-
-def current_wave(led):
-    return led["waves"][-1] if led["waves"] else None
-
-
-def require_phase(led, run, *phases):
-    if led["phase"] not in phases:
-        raise HarnessError(
-            f"phase is {led['phase']}; this command needs {' or '.join(phases)}. Next: {next_action(led, run)}"
-        )
-
-
-def new_item(item_id, kind, parent, depth, text, why, criteria, created_wave):
-    return {
-        "id": item_id,
-        "kind": kind,
-        "parent": parent,
-        "depth": depth,
+def new_node(led, text, kind, why, parent, depth):
+    led["counter"]["node"] += 1
+    nid = f"Q-{led['counter']['node']}"
+    led["nodes"][nid] = {
+        "id": nid,
         "text": text,
+        "kind": kind if kind in KINDS else "fact",
         "why": why,
-        "criteria": criteria,
-        "status": "frontier",
-        "created_wave": created_wave,
-        "dispatched_wave": None,
-        "claim_key": claim_key(text),
-        "token_key": token_key(text),
-        "children": [],
-        "allowance": None,
-        "attempts": 0,
-        "agents_charged": 0,
+        "depends_on": [],
+        "parents": [parent] if parent else [],
+        "depth": depth,
+        "status": "pending",
+        "dispatches": 0,
+        "failures": 0,
+        "reopens": 0,
+        "refreshes": 0,
+        "reframes": 0,
+        "old_texts": [],
+        "objection": None,
+        "partials": [],
+        "assume": [],
+        "force": False,
         "result": None,
         "error": None,
-        "warnings": [],
+        "stale_parents": [],
     }
+    return nid
 
 
-def try_open(led, spec, created_wave, opened_this_call):
-    if not isinstance(spec, dict):
-        return None, "not_an_object"
-    text = as_text(spec.get("text"), 600)
-    if not text:
-        return None, "empty_item"
-    parent = None
-    parent_id = spec.get("parent")
-    if parent_id:
-        try:
-            parent = get_item(led, str(parent_id))
-        except HarnessError:
-            return None, "unknown_parent"
-        if parent["status"] != "done":
-            return None, "parent_not_done"
-    ck, tk = claim_key(text), token_key(text)
-    if ck in led["claim_index"] or (tk and tk in led["token_index"]):
-        return None, "duplicate_item"
-    depth = parent["depth"] + 1 if parent else 1
-    if depth > led["caps"]["max_waves"]:
-        return None, "depth_exhausted"
-    if parent and len(parent["children"]) >= MAX_CHILDREN_PER_PARENT:
-        return None, "breadth_cap"
-    if opened_this_call >= MAX_NEW_ITEMS_PER_WAVE:
-        return None, "layer_cap"
-    known = {c["id"] for c in led["criteria"]}
-    crits = [criterion_id(c) for c in spec.get("criteria") or [] if criterion_id(c) in known]
-    number = sum(1 for i in led["items"] if i["kind"] == "branch") + 1
-    it = new_item(
-        f"T{number}",
-        "branch",
-        parent["id"] if parent else None,
-        depth,
-        text,
-        as_text(spec.get("why"), 400),
-        crits,
-        created_wave,
+def reaches(led, start, target):
+    stack, seen = [start], set()
+    while stack:
+        cur = stack.pop()
+        if cur == target:
+            return True
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(led["nodes"][cur]["depends_on"])
+    return False
+
+
+def recompute_depths(led):
+    root = led["root"]
+    if not root:
+        return
+    depth = {root: 1}
+    order = [root]
+    while order:
+        cur = order.pop(0)
+        for d in led["nodes"][cur]["depends_on"]:
+            if depth.get(d, 0) < depth[cur] + 1:
+                depth[d] = depth[cur] + 1
+                order.append(d)
+    for nid, n in led["nodes"].items():
+        n["depth"] = depth.get(nid, n["depth"])
+
+
+def link(led, parent_id, child_id):
+    """Add parent -> child. Returns an error string or None."""
+    parent, child = node(led, parent_id), node(led, child_id)
+    if child_id == parent_id or reaches(led, child_id, parent_id):
+        return "cycle"
+    if child_id not in parent["depends_on"]:
+        parent["depends_on"].append(child_id)
+    if parent_id not in child["parents"]:
+        child["parents"].append(parent_id)
+    recompute_depths(led)
+    return None
+
+
+def pending_needs_from(led, nid):
+    return [n for n in led["needs"] if n["from"] == nid]
+
+
+def is_ready(led, n):
+    if n["status"] != "pending" or pending_needs_from(led, n["id"]):
+        return False
+    return all(led["nodes"][d]["status"] in SETTLED for d in n["depends_on"])
+
+
+def ready_nodes(led):
+    ready = [n for n in led["nodes"].values() if is_ready(led, n)]
+    return sorted(ready, key=lambda n: (-n["depth"], n["kind"] != "fact", int(n["id"][2:])))
+
+
+def in_flight(led):
+    return dict(led["flight"])
+
+
+def role_of_node(n):
+    return "integrator" if n["depends_on"] else "leaf"
+
+
+def remaining_graph_cost(led):
+    total = 0.0
+    for n in led["nodes"].values():
+        if n["status"] == "pending":
+            total += cost_of(led, role_of_node(n), n["kind"])
+    if led["needs"]:
+        total += cost_of(led, "matcher")
+    return total
+
+
+def log(led, event):
+    led["log"].append({"at": now(), "event": event})
+
+
+def launch_line(led, run, aid):
+    run = run_path(run)
+    return (
+        f"You are an angles agent. Read {run}/prompts/{aid}.md with your Read tool and follow it exactly. "
+        f"Write your reply to {run}/returns/{aid}.md as that file instructs, then reply with just the word done."
     )
-    led["items"].append(it)
-    led["claim_index"][ck] = it["id"]
-    if tk:
-        led["token_index"][tk] = it["id"]
-    if parent:
-        parent["children"].append(it["id"])
-    return it, None
 
 
-def stop_reasons(led):
-    reasons = []
-    if led["criteria"] and all(c["status"] != "open" for c in led["criteria"]):
-        reasons.append("criteria_met")
-    if not any(i["status"] == "frontier" for i in led["items"]):
-        reasons.append("frontier_empty")
-    if len(led["waves"]) >= led["caps"]["max_waves"]:
-        reasons.append("waves_exhausted")
-    if available(led) < 1:
-        reasons.append("budget_exhausted")
-    if led["stall"] >= STALL_LIMIT:
-        reasons.append("stalled")
-    return reasons
+def archive_return(run, aid, tag):
+    run = run_path(run)
+    src = run / "returns" / f"{aid}.md"
+    if not src.exists():
+        return None
+    dst = run / "returns" / "archive" / f"{aid}-{tag}.md"
+    dst.parent.mkdir(exist_ok=True)
+    shutil.move(str(src), str(dst))
+    return str(dst)
 
 
-def maybe_stop(led):
-    reasons = stop_reasons(led)
-    if reasons:
-        led["stopped"]["reasons"] = reasons
-        if led["caps"]["challenge_reserve"] > 0 and led["challenge"] is None:
-            led["phase"] = "challenge"
+def dispatch(led, run, aid, role, kind=None, prompt=""):
+    run = run_path(run)
+    archive_return(run, aid, f"stale-{len(led['log'])}")
+    cost = cost_of(led, role, kind)
+    model = model_for(led, role, kind)
+    (run / "prompts" / f"{aid}.md").write_text(prompt)
+    led["flight"][aid] = {"role": role, "model": model, "cost": cost, "at": now()}
+    led["budget"]["reserved"] += cost
+    return model, cost
+
+
+# ---------------------------------------------------------------- prompts
+
+
+def framing_block(led):
+    f = led["framing"] or {}
+    terms = "\n".join(
+        f"- {t['term']}: {t['meaning']}" + (f" (flag: {t['flag']})" if t.get("flag") else "")
+        for t in f.get("terms", [])
+    )
+    constraints = "\n".join(f"- {c}" for c in f.get("constraints", [])) or "- none stated"
+    assumptions = "\n".join(f"- {a}" for a in f.get("assumptions", [])) or "- none found"
+    return (
+        f"The whole question:\n{led['question']}\n\n"
+        f"The real question, as framed:\n{f.get('real_question', led['question'])}\n\n"
+        f"Terms, as this work uses them:\n{terms or '- none flagged'}\n\n"
+        f"Hidden assumptions in the framing:\n{assumptions}\n\n"
+        f"Hard constraints. Anything you conclude must respect every one:\n{constraints}\n\n"
+        f"What the answer probably turns on:\n{f.get('crux', 'not identified')}\n"
+    )
+
+
+REPLY_RULE = (
+    "Write your reply to {path}. It starts with a JSON header in a ```json fence, followed by free prose. "
+    "Then reply with just the word done."
+)
+
+
+def framer_prompt(led, run):
+    path = run_path(run) / "returns" / "F1.md"
+    return f"""You are the framer. You go first. Your job is to make sure the work answers the right question, in the right terms, in the right order. You do not answer the question.
+
+Question:
+{led['question']}
+
+Do this:
+1. Terms. For each load-bearing word or phrase in the question, say what it must mean for the question to make sense. Flag any term used loosely or wrongly, such as a category error (asking to replace one kind of thing with a different kind of thing that does a different job), and say what the question should mean instead.
+2. Hidden assumptions. What does the framing take for granted that might be false?
+3. The real question. Restate what actually needs answering or deciding, in one or two sentences. Keep every part of the question.
+4. The crux. Your best guess at the single decision, fact, or disagreement the answer will turn on.
+5. Hard constraints the question sets: deadlines, who is available, money or data that must not break.
+6. The question graph. Break the real question into pieces. Each piece is a question someone could settle. A piece depends on another when it cannot be settled well until that one is.
+   - The root is the real question. It depends on the pieces needed to answer it.
+   - Settle terms and premises first. When a definition or a factual premise changes the answer to other pieces, make it a piece they depend on.
+   - When two pieces need the same thing, make that thing one piece both depend on. Never duplicate it.
+   - Leaves are small enough for one careful agent to settle in one pass.
+   - Mark each piece kind "fact" (findable, checkable) or "judgment" (a weighing or decision). Use judgment sparingly for leaves.
+   - Between {MIN_FRAMED} and {MAX_FRAMED} pieces including the root, at most {led['caps']['max_depth']} levels deep, no cycles.
+
+You may read files, search, and fetch pages if the question needs grounding. Keep it brief. Do not launch agents.
+
+{REPLY_RULE.format(path=path)} The header:
+```json
+{{"id": "F1", "status": "framed",
+ "terms": [{{"term": "...", "meaning": "...", "flag": "empty, or what is wrong with how the question uses it"}}],
+ "assumptions": ["..."],
+ "real_question": "...",
+ "crux": "...",
+ "constraints": ["..."],
+ "questions": [{{"key": "A", "text": "...", "kind": "fact", "depends_on": ["B", "C"], "why": "what this unlocks"}}],
+ "root": "A"}}
+```
+"""
+
+
+def dep_block(led, n):
+    lines = []
+    for d in n["depends_on"]:
+        c = led["nodes"][d]
+        r = c["result"] or {}
+        if c["status"] == "resolved":
+            lines.append(
+                f"{d} [{r.get('confidence', '?')} confidence] {c['text']}\n"
+                f"  Resolution: {r.get('resolution', '')}\n"
+                f"  Rests on: {', '.join(r.get('rests_on') or []) or 'not stated'}\n"
+                f"  Full reasoning: {r.get('body_path', 'none')}"
+            )
         else:
-            led["phase"] = "synthesize"
-    return reasons
+            lines.append(f"{d} [could not be settled] {c['text']}\n  State the assumption you make in its place.")
+    return "\n".join(lines)
 
 
-def ordered_frontier(led):
-    open_c = open_criteria(led)
+def node_prompt(led, run, n):
+    path = run_path(run) / "returns" / f"{n['id']}.md"
+    role = role_of_node(n)
+    parents = "\n".join(f"- {p}: {led['nodes'][p]['text']}" for p in n["parents"]) or "- none: this is the root"
+    parts = [
+        "You are one agent on a larger question. You own one piece of it. Other agents own the other pieces. "
+        "When you settle yours, the pieces that depend on it build on your answer, so it has to hold.\n",
+        framing_block(led),
+        f"\nYour piece: {n['id']} ({n['kind']})\n{n['text']}\nWhy it matters: {n['why'] or 'not stated'}\n"
+        f"Pieces that depend on yours:\n{parents}\n",
+    ]
+    if n["depends_on"]:
+        parts.append(f"\nWhat your piece rests on:\n{dep_block(led, n)}\n")
+    if n["objection"]:
+        parts.append(
+            f"\nYour earlier answer to this piece was sent back by {n['objection']['from']}: {n['objection']['reason']}. "
+            f"Your earlier answer is in {n['objection']['previous']}. Address this directly.\n"
+        )
+    if n["partials"]:
+        parts.append(f"\nYour earlier work on this piece, before you asked for help: {n['partials'][-1]}. Read it and continue from it.\n")
+    if n["assume"]:
+        items = "\n".join(f"- {a}" for a in n["assume"])
+        parts.append(f"\nThese will not be settled for you. Proceed without them and state the assumption you make for each:\n{items}\n")
+    if n["force"] or led["converge"]:
+        parts.append("\nThe budget is closing. You must settle your piece now. Do not return blocked, reframe, or reject. State your assumptions instead.\n")
+    parts.append(
+        "\nHow to work: however you judge best. Read, search, fetch pages, reason, run read-only commands. "
+        "Do not launch agents. If your piece is too big, or rests on something unsettled, return blocked and name what "
+        "you need. It will be settled and you will be sent back here with the answer.\n"
+    )
+    if role == "integrator":
+        parts.append(
+            "\nYou are building on settled pieces. First check each one: does it actually answer what your piece needs, "
+            "and does it hold up? If one does not, reject it with the reason and it goes back for another pass. You can "
+            "do this once per piece. Then do the thinking this level needs: resolve the tensions between the pieces, "
+            "weigh them, and decide. Do not just restate them.\n"
+        )
+    parts.append(
+        "\nSettled means you could defend it to a skeptic who knows the domain. What it rests on is stated. Every "
+        "number not given in the question says whether it is measured, sourced, an estimate (with a range and the "
+        "assumption behind it), or an assumption. Uncertainty is explicit. If you cannot reach that bar without "
+        "another piece settled first, you are blocked, not settled. If your piece is framed wrong, say so: return "
+        "reframe with the better question.\n\n"
+        f"{REPLY_RULE.format(path=path)} Put the substance in the prose: the argument, lists, tables, numbers. "
+        "Pieces above you read the resolution first and your prose when they need it. The header:\n"
+        "```json\n"
+        f'{{"id": "{n["id"]}", "status": "resolved | blocked | reframe",\n'
+        ' "resolution": "150 words or fewer: your answer to this piece as a standalone statement others can build on",\n'
+        ' "confidence": "low | medium | high",\n'
+        ' "rests_on": ["Q-5", "assumption: ..."],\n'
+        ' "needs": [{"question": "a piece that must be settled first", "why": "..."}],\n'
+        ' "reframe": {"text": "the better question", "why": "..."},\n'
+        ' "reject": [{"id": "Q-5", "reason": "..."}]}\n'
+        "```\n"
+        "Fill needs only when blocked, reframe only when reframing, reject only when rejecting a dependency.\n"
+    )
+    return "".join(parts)
 
-    def score(it):
-        return (-len(set(it["criteria"]) & open_c), it["depth"], id_number(it["id"]))
 
-    frontier = sorted((i for i in led["items"] if i["status"] == "frontier"), key=score)
-    groups = {}
-    for it in frontier:
-        groups.setdefault(it["parent"] or "", []).append(it)
-    queues = sorted(groups.values(), key=lambda g: score(g[0]))
-    ordered = []
-    while any(queues):
-        for queue in queues:
-            if queue:
-                ordered.append(queue.pop(0))
-    return ordered
+def matcher_prompt(led, run, jid, needs):
+    path = run_path(run) / "returns" / f"{jid}.md"
+    existing = "\n".join(f"{nid} [{n['status']}] {n['text']}" for nid, n in led["nodes"].items())
+    reqs = "\n".join(f"{x['id']} from {x['from']}: {x['question']} (why: {x['why']})" for x in needs)
+    return f"""You are the matcher. Pieces of a larger question have asked for other pieces to be settled first. For each request, decide whether it is the same question as a piece that already exists, even if worded differently, or a new piece.
+
+Same means settling the existing piece would give the requester what it needs. Close but different is new. When two requests ask for the same new thing, make one new piece and point the other request at it with same_as.
+
+The question being worked:
+{led['question']}
+
+Existing pieces:
+{existing}
+
+Requests:
+{reqs}
+
+Do not launch agents.
+
+{REPLY_RULE.format(path=path)} The header has one entry per request:
+```json
+{{"id": "{jid}", "status": "matched",
+ "links": [{{"need": "N1", "to": "Q-4"}},
+           {{"need": "N2", "new": {{"text": "a crisp question", "kind": "fact"}}}},
+           {{"need": "N3", "same_as": "N2"}}]}}
+```
+"""
+
+
+def settled_block(led):
+    lines = []
+    for nid, n in sorted(led["nodes"].items(), key=lambda kv: (kv[1]["depth"], int(kv[0][2:]))):
+        r = n["result"] or {}
+        if n["status"] == "resolved":
+            lines.append(
+                f"{nid} (depth {n['depth']}, {r.get('confidence', '?')} confidence) {n['text']}\n"
+                f"  Resolution: {r.get('resolution', '')}\n  Full reasoning: {r.get('body_path', '')}"
+            )
+        else:
+            lines.append(f"{nid} (not settled: {n['status']}) {n['text']}")
+    return "\n".join(lines)
+
+
+ANSWER_RULES = """Answer rules:
+- Lead with the decision or answer in one line. Then the plan or explanation. Then the reasoning a reader needs to trust it.
+- Answer every part of the question as asked, directly.
+- If a term in the question was used wrongly, say so plainly in one or two sentences, then answer the corrected question too.
+- Say what the answer turns on and why.
+- Carry the substance. Include the lists and tables the pieces built, in compact form. Never mention something ("six failure modes") without including it.
+- Keep the hedges. Every number not given in the question has its basis inline, or is listed under "## Assumptions and estimates" with its range and the assumption behind it.
+- Recompute every derived number, duration, and date yourself: sums, engineer-weeks from people and weeks, days between two events. They must add up.
+- Put in each category only what belongs there. A reason not to act is not a reason to act.
+- Name the riskiest thing you recommend and why it fits the constraints.
+- Simplest version that works. Cut any step, gate, or role that would not change a decision.
+- No bookkeeping. No piece ids, and no mention of agents, pieces, the process, or how the answer was produced.
+- End with "## What would change this": the facts only the reader can check, and how each would change the answer.
+
+Template:
+# <the decision or answer in one line>
+<body>
+## Assumptions and estimates
+<every estimate and assumption, with range and basis>
+## What would change this
+<facts the reader can check, and how each changes the answer>
+"""
+
+
+def writer_prompt(led, run, jid, draft_path, challenge=None, previous=None):
+    path = run_path(run) / "returns" / f"{jid}.md"
+    root = led["nodes"].get(led["root"], {})
+    rr = (root.get("result") or {})
+    parts = [
+        "You write the final answer. Many agents settled the pieces of this question, from the bottom up. "
+        "Your job is to turn what they settled into the answer a smart, busy reader acts on.\n\n",
+        framing_block(led),
+        f"\nThe root piece: {root.get('text', '')}\nIts resolution: {rr.get('resolution', 'not settled')}\n"
+        f"Its full reasoning: {rr.get('body_path', 'none')}\n\n"
+        f"Every piece, deepest last. Read the full reasoning of any piece you rely on:\n{settled_block(led)}\n\n",
+    ]
+    if challenge is not None:
+        parts.append(
+            f"You are revising. The current draft is {previous}. A challenger attacked it:\n{challenge}\n\n"
+            "Fix every problem marked breaks or weakens, or keep the claim and say in the answer why it holds. "
+            "Answer every question gap. Keep what the challenge did not touch.\n\n"
+        )
+    parts.append(ANSWER_RULES)
+    parts.append(
+        f"\nWrite the answer itself to {draft_path}, overwriting it. Then write your reply to {path}: a JSON header in a "
+        "```json fence, followed by any notes. The claim map is for the audit, never the answer: each load-bearing "
+        "claim in the answer and the pieces it comes from. Then reply with just the word done.\n"
+        "```json\n"
+        f'{{"id": "{jid}", "status": "written",\n'
+        ' "claim_map": [{"claim": "...", "from": ["Q-2", "Q-5"]}],\n'
+        ' "changes": [{"challenge": "only when revising: what the challenger said", "change": "what you did"}]}\n'
+        "```\n"
+    )
+    return "".join(parts)
+
+
+def challenger_prompt(led, run, draft_path):
+    path = run_path(run) / "returns" / "X1.md"
+    return f"""You are the challenger. There is a draft answer. Your job is to break it before anyone relies on it.
+
+{framing_block(led)}
+The draft is {draft_path}. Read it.
+
+The settled pieces it was built from, with their full reasoning, so you can check the draft against them:
+{settled_block(led)}
+
+Run these checks yourself. Each one that finds a problem becomes a challenge.
+a. Question check. Reread the question word for word. List every part it asks. Is each answered completely and directly? Put every part answered only partly, or not at all, in question_gaps.
+b. Riskiest step. Name the single riskiest thing the draft recommends. Check it against every hard constraint. If a safer option meets the goal, that is a challenge.
+c. Unsourced numbers. Every number not given in the question needs a basis, or a label as an estimate or starting default with its assumption.
+d. Dangling references. The draft must contain whatever it refers to.
+e. Consistency. Recompute every derived number, duration, and date: engineer-weeks from people and weeks, days between two events, totals. Check that each item sits in the right category or column. Check that the draft does not contradict itself or the pieces it was built from.
+f. Load-bearing claims. Pick the two or three claims the answer most depends on and try hard to refute them. Read the relevant pieces' reasoning, search, or reason from first principles.
+
+Do not launch agents. Severity ok means the claim survived a real attempt to break it; say what you tried.
+
+{REPLY_RULE.format(path=path)} The header:
+```json
+{{"id": "X1", "status": "challenged",
+ "question_gaps": ["a part of the question the draft does not fully answer"],
+ "challenges": [{{"claim": "...", "problem": "...", "severity": "breaks | weakens | ok", "basis": "..."}}]}}
+```
+"""
+
+
+# ---------------------------------------------------------------- ingest
+
+
+def norm_list(value, limit=400):
+    if not isinstance(value, list):
+        return []
+    return [text_of(v, limit) for v in value if text_of(v, 1)]
+
+
+def ingest_framer(led, header, body_path):
+    qs = header.get("questions")
+    root_key = text_of(header.get("root"), 40)
+    if not isinstance(qs, list) or not MIN_FRAMED <= len(qs) <= MAX_FRAMED:
+        raise HarnessError(f"framer: questions must be a list of {MIN_FRAMED} to {MAX_FRAMED}")
+    keys = {}
+    for q in qs:
+        if not isinstance(q, dict) or not text_of(q.get("key"), 1) or not text_of(q.get("text"), 1):
+            raise HarnessError("framer: every question needs a key and text")
+        keys[text_of(q["key"], 40)] = q
+    if root_key not in keys:
+        raise HarnessError(f"framer: root {root_key!r} is not one of the question keys")
+    for q in qs:
+        for d in q.get("depends_on") or []:
+            if text_of(d, 40) not in keys:
+                raise HarnessError(f"framer: {q['key']} depends on unknown key {d!r}")
+    led["framing"] = {
+        "terms": [
+            {"term": text_of(t.get("term"), 120), "meaning": text_of(t.get("meaning"), 400), "flag": text_of(t.get("flag"), 400)}
+            for t in header.get("terms") or []
+            if isinstance(t, dict) and text_of(t.get("term"), 1)
+        ],
+        "assumptions": norm_list(header.get("assumptions")),
+        "real_question": text_of(header.get("real_question"), 1200) or led["question"],
+        "crux": text_of(header.get("crux"), 800),
+        "constraints": norm_list(header.get("constraints")),
+        "notes": body_path,
+    }
+    ids = {}
+    for key, q in keys.items():
+        ids[key] = new_node(led, text_of(q["text"], 800), text_of(q.get("kind"), 20).lower(), text_of(q.get("why"), 400), None, 1)
+    led["root"] = ids[root_key]
+    warnings = []
+    for key, q in keys.items():
+        for d in q.get("depends_on") or []:
+            err = link(led, ids[key], ids[text_of(d, 40)])
+            if err:
+                warnings.append(f"framer edge {key}->{d} dropped: {err}")
+    orphans = [nid for nid in ids.values() if nid != led["root"] and not led["nodes"][nid]["parents"]]
+    for nid in orphans:
+        link(led, led["root"], nid)
+        warnings.append(f"{nid} had no parent; attached to the root")
+    too_deep = [nid for nid, n in led["nodes"].items() if n["depth"] > led["caps"]["max_depth"]]
+    if too_deep:
+        warnings.append(f"deeper than max_depth: {', '.join(too_deep)}")
+    led["phase"] = "working"
+    return warnings
+
+
+def add_need(led, nid, need):
+    led["counter"]["need"] += 1
+    led["needs"].append(
+        {"id": f"N{led['counter']['need']}", "from": nid, "question": text_of(need.get("question"), 600), "why": text_of(need.get("why"), 300), "assigned": None}
+    )
+
+
+def ingest_node(led, nid, header, body_path):
+    n = node(led, nid)
+    status = text_of(header.get("status"), 20).lower()
+    warnings = []
+    rejects = [r for r in header.get("reject") or [] if isinstance(r, dict)]
+    valid_rejects = []
+    for r in rejects:
+        rid = text_of(r.get("id"), 20)
+        if rid not in n["depends_on"] or led["nodes"][rid]["status"] != "resolved":
+            warnings.append(f"reject of {rid} ignored: not a settled dependency")
+        elif led["nodes"][rid]["reopens"] >= MAX_REOPENS:
+            warnings.append(f"reject of {rid} ignored: already sent back once")
+        else:
+            valid_rejects.append((rid, text_of(r.get("reason"), 600)))
+    if valid_rejects and not led["converge"]:
+        for rid, reason in valid_rejects:
+            c = led["nodes"][rid]
+            c["reopens"] += 1
+            c["objection"] = {"from": nid, "reason": reason, "previous": (c["result"] or {}).get("body_path")}
+            c["status"] = "pending"
+            c["stale_parents"] = [p for p in c["parents"] if p != nid and led["nodes"][p]["status"] == "resolved"]
+            c["result"] = None
+            log(led, f"{nid} sent {rid} back: {short(reason, 160)}")
+        n["partials"].append(body_path)
+        n["status"] = "pending"
+        return "sent a dependency back", warnings
+    if status == "reframe" and not (n["force"] or led["converge"]):
+        rf = header.get("reframe") if isinstance(header.get("reframe"), dict) else {}
+        new_text = text_of(rf.get("text"), 800)
+        if new_text and n["reframes"] < MAX_REFRAMES:
+            n["reframes"] += 1
+            n["old_texts"].append(n["text"])
+            n["text"] = new_text
+            n["partials"].append(body_path)
+            n["status"] = "pending"
+            log(led, f"{nid} reframed: {short(rf.get('why'), 160)}")
+            return "reframed", warnings
+        warnings.append("reframe refused; the piece must be settled as stated")
+        n["force"] = True
+        n["status"] = "pending"
+        n["partials"].append(body_path)
+        return "reframe refused", warnings
+    if status == "blocked" and not (n["force"] or led["converge"]):
+        needs = [x for x in header.get("needs") or [] if isinstance(x, dict) and text_of(x.get("question"), 1)]
+        if needs and n["dispatches"] < MAX_DISPATCHES:
+            for x in needs[:4]:
+                add_need(led, nid, x)
+            n["partials"].append(body_path)
+            n["status"] = "pending"
+            log(led, f"{nid} blocked on {len(needs[:4])} need(s)")
+            return "blocked", warnings
+        warnings.append("blocked with no needs, or too many passes; must settle next time")
+        n["force"] = True
+        n["partials"].append(body_path)
+        n["status"] = "pending"
+        return "forced to settle", warnings
+    resolution = text_of(header.get("resolution"), 1500)
+    if not resolution:
+        raise HarnessError("resolution missing")
+    if status not in ("resolved",):
+        warnings.append(f"status {status!r} recorded as resolved")
+    confidence = text_of(header.get("confidence"), 20).lower()
+    if confidence not in CONFIDENCE:
+        warnings.append(f"confidence {confidence!r} recorded as low")
+        confidence = "low"
+    n["result"] = {
+        "resolution": resolution,
+        "confidence": confidence,
+        "rests_on": norm_list(header.get("rests_on"), 300),
+        "body_path": body_path,
+        "at": now(),
+    }
+    n["status"] = "resolved"
+    n["objection"] = None
+    refreshed = refresh_stale(led, n)
+    if refreshed:
+        warnings.append(f"sent back to recheck against the revision: {', '.join(refreshed)}")
+    return "resolved", warnings
+
+
+def refresh_stale(led, n):
+    """A revised piece sends the pieces that already built on its old answer back once."""
+    stale, n["stale_parents"] = n["stale_parents"], []
+    if led["converge"]:
+        return []
+    refreshed = []
+    for pid in stale:
+        p = led["nodes"][pid]
+        if p["status"] != "resolved" or p["refreshes"] >= MAX_REOPENS:
+            continue
+        p["refreshes"] += 1
+        p["objection"] = {
+            "from": n["id"],
+            "reason": f"{n['id']}, which your answer builds on, was revised after you settled. Recheck your answer against its new resolution and change what no longer holds",
+            "previous": (p["result"] or {}).get("body_path"),
+        }
+        p["stale_parents"] = [q for q in p["parents"] if led["nodes"][q]["status"] == "resolved"]
+        p["status"] = "pending"
+        p["result"] = None
+        refreshed.append(pid)
+        log(led, f"{pid} sent back to recheck after {n['id']} was revised")
+    return refreshed
+
+
+def ingest_matcher(led, jid, header):
+    assigned = [x for x in led["needs"] if x["assigned"] == jid]
+    by_id = {x["id"]: x for x in assigned}
+    links = {text_of(l.get("need"), 20): l for l in header.get("links") or [] if isinstance(l, dict)}
+    created, notes = {}, []
+
+    def refuse(x, reason):
+        led["nodes"][x["from"]]["assume"].append(f"{x['question']} ({reason})")
+        notes.append(f"{x['id']} not linked: {reason}")
+
+    def make_new(x, text, kind):
+        if len(led["nodes"]) >= led["caps"]["max_nodes"]:
+            refuse(x, "piece cap reached")
+            return None
+        depth = led["nodes"][x["from"]]["depth"] + 1
+        if depth > led["caps"]["max_depth"]:
+            refuse(x, "depth cap reached")
+            return None
+        nid = new_node(led, text, kind, x["why"], None, depth)
+        err = link(led, x["from"], nid)
+        if err:
+            refuse(x, err)
+            return None
+        created[x["id"]] = nid
+        notes.append(f"{x['id']} -> new {nid}")
+        return nid
+
+    later = []
+    for x in assigned:
+        l = links.get(x["id"], {})
+        if text_of(l.get("to"), 20) in led["nodes"]:
+            target = text_of(l["to"], 20)
+            err = link(led, x["from"], target)
+            if err:
+                refuse(x, f"linking {target} would create a {err}; settle both together in your answer")
+            else:
+                notes.append(f"{x['id']} -> existing {target}")
+        elif isinstance(l.get("new"), dict) and text_of(l["new"].get("text"), 1):
+            make_new(x, text_of(l["new"]["text"], 800), text_of(l["new"].get("kind"), 20).lower())
+        elif text_of(l.get("same_as"), 20) in by_id:
+            later.append((x, text_of(l["same_as"], 20)))
+        else:
+            make_new(x, x["question"], "fact")
+    for x, other in later:
+        target = created.get(other)
+        if target:
+            err = link(led, x["from"], target)
+            if err:
+                refuse(x, err)
+            else:
+                notes.append(f"{x['id']} -> {target} (same as {other})")
+        else:
+            make_new(x, x["question"], "fact")
+    led["needs"] = [x for x in led["needs"] if x["assigned"] != jid]
+    led["links"].extend(notes)
+    return notes
+
+
+def ingest_challenger(led, header):
+    challenges = []
+    for c in header.get("challenges") or []:
+        if not isinstance(c, dict) or not text_of(c.get("claim"), 1):
+            continue
+        sev = text_of(c.get("severity"), 20).lower()
+        challenges.append(
+            {
+                "claim": text_of(c.get("claim"), 600),
+                "problem": text_of(c.get("problem"), 900),
+                "severity": sev if sev in SEVERITY else "weakens",
+                "basis": text_of(c.get("basis"), 500),
+            }
+        )
+    return {"question_gaps": norm_list(header.get("question_gaps")), "challenges": challenges}
+
+
+def cmd_ingest(a):
+    led = load(a.run)
+    run = run_path(a.run)
+    if not led["flight"]:
+        raise HarnessError(f"nothing in flight. Next: {next_action(led, run)}")
+    targets = [a.failed] if a.failed else list(led["flight"])
+    report, missing = [], []
+    for aid in targets:
+        if aid not in led["flight"]:
+            raise HarnessError(f"{aid} is not in flight")
+        info = led["flight"][aid]
+        ret = run / "returns" / f"{aid}.md"
+        if not a.failed and not ret.exists():
+            missing.append(aid)
+            continue
+        led["budget"]["reserved"] -= info["cost"]
+        led["budget"]["spent"] += info["cost"]
+        led["spend_log"].append({"id": aid, "role": info["role"], "model": info["model"], "cost": info["cost"]})
+        del led["flight"][aid]
+        warnings, outcome = [], ""
+        try:
+            if a.failed:
+                raise HarnessError(f"task failed: {a.reason or 'no reason given'}")
+            text = ret.read_text()
+            tag = len(led["spend_log"])
+            body_path = archive_return(run, aid, str(tag))
+            header, _ = parse_reply(text)
+            role = info["role"]
+            if role == "framer":
+                warnings = ingest_framer(led, header, body_path)
+                outcome = f"framed: {len(led['nodes'])} pieces, root {led['root']}"
+                led["jobs"]["F1"] = {"status": "done", "body": body_path}
+            elif role in ("leaf", "integrator"):
+                outcome, warnings = ingest_node(led, aid, header, body_path)
+            elif role == "matcher":
+                warnings = ingest_matcher(led, aid, header)
+                outcome = "matched"
+                led["jobs"][aid] = {"status": "done", "body": body_path}
+            elif role == "writer":
+                led["jobs"]["W1"] = {"status": "done", "body": body_path, "claim_map": header.get("claim_map") or []}
+                led["phase"] = "challenging"
+                outcome = "draft written"
+            elif role == "challenger":
+                led["jobs"]["X1"] = {"status": "done", "body": body_path, **ingest_challenger(led, header)}
+                led["phase"] = "revising"
+                outcome = "challenged"
+            elif role == "reviser":
+                led["jobs"]["W2"] = {
+                    "status": "done",
+                    "body": body_path,
+                    "claim_map": header.get("claim_map") or [],
+                    "changes": header.get("changes") or [],
+                }
+                led["phase"] = "finishing"
+                outcome = "revised"
+        except HarnessError as e:
+            outcome = f"failed: {e}"
+            fail(led, aid, info["role"], str(e))
+        report.append((aid, outcome, warnings))
+    save(a.run, led)
+    for aid, outcome, warnings in report:
+        print(f"{aid}: {outcome}")
+        for w in warnings:
+            print(f"  {w}")
+    if missing:
+        print(f"no reply file yet from: {', '.join(missing)}. Relaunch them, or run: python3 {SCRIPT} ingest {run} --failed <id> --reason \"...\"")
+    print(budget_line(led))
+    print(f"Next: {next_action(led, run)}")
+
+
+def fail(led, aid, role, error):
+    if role in ("leaf", "integrator"):
+        n = led["nodes"][aid]
+        n["failures"] += 1
+        n["error"] = error
+        n["status"] = "pending" if n["failures"] < MAX_FAILURES else "failed"
+    else:
+        job = led["jobs"].setdefault(aid, {"status": "pending", "failures": 0})
+        job["failures"] = job.get("failures", 0) + 1
+        job["error"] = error
+        if job["failures"] >= MAX_FAILURES:
+            job["status"] = "failed"
+            if role == "matcher":
+                for x in led["needs"]:
+                    if x["assigned"] == aid:
+                        x["assigned"] = None
+            if role == "writer":
+                led["phase"] = "challenging"
+            if role == "challenger":
+                led["phase"] = "revising"
+            if role == "reviser":
+                led["phase"] = "finishing"
+        else:
+            del led["jobs"][aid]
+            if role == "matcher":
+                for x in led["needs"]:
+                    if x["assigned"] == aid:
+                        x["assigned"] = None
+
+
+# ---------------------------------------------------------------- next
+
+
+def update_converge(led):
+    if led["converge"]:
+        return
+    if available(led) < remaining_graph_cost(led) or len(led["nodes"]) >= led["caps"]["max_nodes"]:
+        led["converge"] = True
+        log(led, "converging: budget or piece cap reached; no new pieces, every piece must settle")
+        for x in list(led["needs"]):
+            if x["assigned"] is None:
+                led["nodes"][x["from"]]["assume"].append(f"{x['question']} (not settled: budget closing)")
+                led["needs"].remove(x)
+
+
+def cmd_next(a):
+    led = load(a.run)
+    run = run_path(a.run)
+    if led["flight"]:
+        raise HarnessError(f"{', '.join(led['flight'])} still in flight. Ingest first. Next: {next_action(led, run)}")
+    launches = []
+    phase = led["phase"]
+    if phase == "framing":
+        if led["jobs"].get("F1", {}).get("status") == "failed":
+            raise HarnessError(f"the framer failed twice: {led['jobs']['F1'].get('error')}. Fix the prompt or start over")
+        launches.append(("F1",) + dispatch(led, run, "F1", "framer", prompt=framer_prompt(led, run)))
+    elif phase == "working":
+        launches = work_step(led, run)
+    elif phase == "writing":
+        draft = run / "answer-draft.md"
+        launches.append(("W1",) + dispatch(led, run, "W1", "writer", prompt=writer_prompt(led, run, "W1", draft)))
+    elif phase == "challenging":
+        draft = run / "answer-draft.md"
+        if not draft.exists():
+            raise HarnessError(f"{draft} missing; the writer did not write the draft. Relaunch W1 or write it by hand.")
+        launches.append(("X1",) + dispatch(led, run, "X1", "challenger", prompt=challenger_prompt(led, run, draft)))
+    elif phase == "revising":
+        draft = run / "answer-draft.md"
+        prev = run / "drafts" / "answer-draft-1.md"
+        prev.parent.mkdir(exist_ok=True)
+        if draft.exists():
+            shutil.copy(draft, prev)
+        x = led["jobs"].get("X1", {})
+        challenge = json.dumps({"question_gaps": x.get("question_gaps", []), "challenges": x.get("challenges", [])}, indent=1)
+        launches.append(("W2",) + dispatch(led, run, "W2", "reviser", prompt=writer_prompt(led, run, "W2", draft, challenge, prev)))
+    elif phase in ("finishing", "done"):
+        print(f"Next: {next_action(led, run)}")
+        return
+    save(a.run, led)
+    if not launches:
+        print(f"nothing to launch. Next: {next_action(led, run)}")
+        return
+    led["counter"]["step"] = led["counter"].get("step", 0) + 1
+    save(a.run, led)
+    print(f"step {led['counter']['step']}: launch every agent below in one message. Task, subagent_type generalPurpose, with the model shown:")
+    for aid, model, cost in launches:
+        print(f"  {aid} [{led['flight'][aid]['role']}, model {model}, est ${cost:.2f}]: {launch_line(led, run, aid)}")
+    print(budget_line(led))
+    print(f"Next: after they all reply done, run: python3 {SCRIPT} ingest {run}")
+
+
+def work_step(led, run):
+    launches = []
+    root = led["nodes"][led["root"]]
+    if root["status"] in SETTLED:
+        led["phase"] = "writing"
+        log(led, f"root {root['status']}; moving to writing")
+        draft = run_path(run) / "answer-draft.md"
+        return [("W1",) + dispatch(led, run, "W1", "writer", prompt=writer_prompt(led, run, "W1", draft))]
+    update_converge(led)
+    unassigned = [x for x in led["needs"] if x["assigned"] is None]
+    if unassigned and not led["converge"]:
+        led["counter"]["matcher"] += 1
+        jid = f"M{led['counter']['matcher']}"
+        for x in unassigned:
+            x["assigned"] = jid
+        launches.append((jid,) + dispatch(led, run, jid, "matcher", prompt=matcher_prompt(led, run, jid, unassigned)))
+    for n in ready_nodes(led):
+        if len(launches) >= MAX_PARALLEL:
+            break
+        role = role_of_node(n)
+        cost = cost_of(led, role, n["kind"])
+        if cost > available(led) + 1e-9:
+            if not led["converge"]:
+                led["converge"] = True
+                log(led, "converging: the next piece does not fit the budget")
+            continue
+        if n["dispatches"] >= MAX_DISPATCHES:
+            n["force"] = True
+        n["dispatches"] += 1
+        n["status"] = "dispatched"
+        launches.append((n["id"],) + dispatch(led, run, n["id"], role, n["kind"], node_prompt(led, run, n)))
+    if launches:
+        return launches
+    unsettled = [n for n in led["nodes"].values() if n["status"] not in SETTLED]
+    if not led["converge"]:
+        led["converge"] = True
+        log(led, "converging: nothing was ready")
+        return work_step(led, run)
+    stuck = sorted((n for n in unsettled if n["status"] == "pending"), key=lambda n: -n["depth"])
+    if stuck and cost_of(led, role_of_node(stuck[0]), stuck[0]["kind"]) <= available(led) + 1e-9:
+        n = stuck[0]
+        for d in list(n["depends_on"]):
+            if led["nodes"][d]["status"] not in SETTLED:
+                n["assume"].append(f"{led['nodes'][d]['text']} (not settled in time)")
+                n["depends_on"].remove(d)
+        n["force"] = True
+        n["dispatches"] += 1
+        n["status"] = "dispatched"
+        log(led, f"forcing {n['id']} to settle on assumptions")
+        return [(n["id"],) + dispatch(led, run, n["id"], role_of_node(n), n["kind"], node_prompt(led, run, n))]
+    for n in unsettled:
+        n["status"] = "failed"
+        n["error"] = n["error"] or "not settled before the budget ran out"
+    led["phase"] = "writing"
+    log(led, "budget exhausted before the root settled; writing from what is settled")
+    draft = run_path(run) / "answer-draft.md"
+    return [("W1",) + dispatch(led, run, "W1", "writer", prompt=writer_prompt(led, run, "W1", draft))]
+
+
+# ---------------------------------------------------------------- finish
+
+
+def answer_problems(answer, question):
+    problems = []
+    if not answer.strip():
+        return ["answer is empty"]
+    for heading in ANSWER_REQUIRED_HEADINGS:
+        if heading not in answer:
+            problems.append(f"answer needs a heading starting {heading!r}")
+    for pattern, label in ANSWER_BANNED:
+        if re.search(pattern, question):
+            continue
+        hits = sorted({m.group(0) for m in re.finditer(pattern, answer)})
+        if hits:
+            problems.append(f"answer contains {label}: {', '.join(hits[:6])}")
+    return problems
+
+
+def build_audit(led):
+    f = led["framing"] or {}
+    out = ["# Audit", "", "## Framing", "", f"Real question: {f.get('real_question', '')}", "", f"Crux: {f.get('crux', '')}", ""]
+    for t in f.get("terms", []):
+        out.append(f"- Term {t['term']}: {t['meaning']}" + (f" Flag: {t['flag']}" if t.get("flag") else ""))
+    for c in f.get("constraints", []):
+        out.append(f"- Constraint: {c}")
+    for s in f.get("assumptions", []):
+        out.append(f"- Hidden assumption: {s}")
+    out += ["", "## Graph", ""]
+    seen = set()
+
+    def walk(nid, indent):
+        n = led["nodes"][nid]
+        shared = f" (shared by {', '.join(n['parents'])})" if len(n["parents"]) > 1 else ""
+        mark = " (see above)" if nid in seen else ""
+        r = n["result"] or {}
+        conf = f", {r.get('confidence')} confidence" if r else ""
+        out.append(f"{'  ' * indent}- {nid} [{n['status']}{conf}] {short(n['text'], 200)}{shared}{mark}")
+        if nid in seen:
+            return
+        seen.add(nid)
+        if r:
+            out.append(f"{'  ' * indent}  Resolution: {short(r.get('resolution'), 600)}")
+        for d in n["depends_on"]:
+            walk(d, indent + 1)
+
+    if led["root"]:
+        walk(led["root"], 0)
+    events = [e["event"] for e in led["log"]]
+    out += ["", "## Changes to the graph", ""]
+    out += [f"- {e}" for e in events] or ["- none"]
+    out += [f"- link: {l}" for l in led["links"]]
+    for n in led["nodes"].values():
+        if n["old_texts"]:
+            out.append(f"- {n['id']} was reframed from: {' / '.join(short(t, 200) for t in n['old_texts'])}")
+        if n["assume"]:
+            out.append(f"- {n['id']} proceeded on assumptions for: {'; '.join(short(x, 160) for x in n['assume'])}")
+    claim_map = (led["jobs"].get("W2") or led["jobs"].get("W1") or {}).get("claim_map") or []
+    out += ["", "## Claim map", ""]
+    for c in claim_map:
+        if isinstance(c, dict):
+            out.append(f"- {short(c.get('claim'), 300)}: {', '.join(map(str, c.get('from') or [])) or 'no piece named'}")
+    if not claim_map:
+        out.append("- none given")
+    x = led["jobs"].get("X1") or {}
+    out += ["", "## Challenge", ""]
+    if x.get("status") == "done":
+        for g in x.get("question_gaps", []):
+            out.append(f"- Question gap: {g}")
+        for c in x.get("challenges", []):
+            out.append(f"- [{c['severity']}] {short(c['claim'], 300)}: {short(c['problem'], 500)}")
+        for c in (led["jobs"].get("W2") or {}).get("changes") or []:
+            if isinstance(c, dict):
+                out.append(f"- Change: {short(c.get('change'), 400)} (for: {short(c.get('challenge'), 200)})")
+    else:
+        out.append(f"- challenge {x.get('status', 'not run')}")
+    unsettled = [n for n in led["nodes"].values() if n["status"] != "resolved"]
+    out += ["", "## Open questions", ""]
+    out += [f"- {n['id']} not settled ({n['status']}): {short(n['text'], 200)}" for n in unsettled] or ["- every piece settled"]
+    b = led["budget"]
+    by_role = {}
+    for s in led["spend_log"]:
+        key = f"{s['role']} on {s['model']}"
+        by_role[key] = by_role.get(key, 0) + s["cost"]
+    out += [
+        "",
+        "## Run",
+        "",
+        f"Run directory {led['run_dir']}. {len(led['nodes'])} pieces, {len(led['spend_log'])} agent replies. "
+        f"Estimated spend ${b['spent']:.2f} of ${b['limit']:.2f}. Converged early: {'yes' if led['converge'] else 'no'}.",
+    ]
+    out += [f"- {k}: ${v:.2f}" for k, v in sorted(by_role.items())]
+    out += ["", AGREEMENT, ""]
+    return "\n".join(out)
+
+
+def cmd_finish(a):
+    led = load(a.run)
+    run = run_path(a.run)
+    if led["phase"] not in ("finishing",):
+        raise HarnessError(f"phase is {led['phase']}. Next: {next_action(led, run)}")
+    draft = run / "answer-draft.md"
+    answer = read_file(draft)
+    problems = answer_problems(answer, led["question"])
+    if problems:
+        raise HarnessError("; ".join(problems) + f". Fix {draft} and run finish again")
+    (run / "answer.md").write_text(answer)
+    (run / "audit.md").write_text(build_audit(led))
+    led["phase"] = "done"
+    led["finished_at"] = now()
+    save(a.run, led)
+    errors = validate_ledger(led, run)
+    print(f"finished: answer {run / 'answer.md'} ({len(answer.split())} words), audit {run / 'audit.md'}")
+    print(budget_line(led))
+    print("validate: OK" if not errors else "validate: " + "; ".join(errors))
+
+
+def cmd_assume(a):
+    led = load(a.run)
+    n = node(led, a.piece)
+    if n["status"] in SETTLED:
+        raise HarnessError(f"{a.piece} is already {n['status']}")
+    if n["status"] == "dispatched":
+        raise HarnessError(f"{a.piece} is in flight")
+    n["result"] = {"resolution": text_of(a.text, 1500), "confidence": "low", "rests_on": ["assumption set by the planner"], "body_path": None, "at": now()}
+    n["status"] = "resolved"
+    led["needs"] = [x for x in led["needs"] if x["from"] != a.piece]
+    log(led, f"{a.piece} settled by assumption: {short(a.text, 160)}")
+    save(a.run, led)
+    print(f"{a.piece} settled by assumption")
+    print(f"Next: {next_action(led, run_path(a.run))}")
+
+
+# ---------------------------------------------------------------- report
+
+
+def budget_line(led):
+    b = led["budget"]
+    return (
+        f"budget (estimates): spent ${b['spent']:.2f}, in flight ${b['reserved']:.2f}, held for the ending ${endgame_left(led):.2f}, "
+        f"free ${max(0.0, available(led)):.2f} of ${b['limit']:.2f}" + (" | converging" if led["converge"] else "")
+    )
 
 
 def next_action(led, run):
     cmd = f"python3 {SCRIPT}"
     r = str(run_path(run))
-    phase = led["phase"]
-    if phase == "planning":
-        return f"write {r}/plan.json, then run: {cmd} plan {r} --file {r}/plan.json"
-    if phase == "waves":
-        wave = current_wave(led)
-        if wave and wave["status"] == "dispatched":
-            out = [i for i in wave["items"] if get_item(led, i)["status"] == "dispatched"]
-            return (
-                f"launch a lead for each of {', '.join(out)} with the launch line for {r}/prompts/<id>.md, "
-                f"save each reply to {r}/returns/<id>.txt, then run: {cmd} ingest {r} <id> --file {r}/returns/<id>.txt"
-            )
-        if wave and wave["status"] == "returned":
-            n = wave["n"]
-            return (
-                f"run: {cmd} status {r}; write {r}/integrate-{n}.json; "
-                f"then run: {cmd} integrate {r} --file {r}/integrate-{n}.json"
-            )
-        return f"run: {cmd} next {r}"
-    if phase == "challenge":
-        if led["challenge"] is None:
-            return f"write the draft answer to {r}/draft.md, then run: {cmd} challenge {r} --draft-file {r}/draft.md"
-        return (
-            f"launch the challenger with the launch line for {r}/prompts/X1.md, save the reply to {r}/returns/X1.txt, "
-            f"then run: {cmd} ingest {r} X1 --file {r}/returns/X1.txt"
-        )
-    if phase == "synthesize":
-        return (
-            f"write {r}/answer-draft.md and {r}/audit-draft.md from the templates, then run: "
-            f"{cmd} finish {r} --answer-file {r}/answer-draft.md --audit-file {r}/audit-draft.md"
-        )
-    return f"done. Answer at {r}/answer.md, audit at {r}/audit.md. Check with: {cmd} validate {r}"
+    if led["flight"]:
+        return f"launch {', '.join(led['flight'])} if not yet launched, then run: {cmd} ingest {r}"
+    if led["phase"] == "finishing":
+        return f"run: {cmd} finish {r}"
+    if led["phase"] == "done":
+        return f"done. Answer {r}/answer.md, audit {r}/audit.md. Check with: {cmd} validate {r}"
+    return f"run: {cmd} next {r}"
 
 
-LEAD_TEMPLATE = string.Template(
-    """You are an angles branch lead. You own one branch of a larger investigation. A planner above you owns the overall plan. It will fold your report in with the other branches and decide what happens next.
+def cmd_status(a):
+    led = load(a.run)
+    print(f"phase: {led['phase']} | {len(led['nodes'])} pieces | {budget_line(led)}")
+    f = led["framing"]
+    if f:
+        print(f"real question: {short(f['real_question'], 400)}")
+        print(f"crux: {short(f['crux'], 300)}")
+        for t in f["terms"]:
+            if t.get("flag"):
+                print(f"  flagged term {t['term']}: {short(t['flag'], 200)}")
+    if led["root"]:
+        seen = set()
 
-Question:
-$question
+        def walk(nid, indent):
+            n = led["nodes"][nid]
+            extra = f" <- also {', '.join(p for p in n['parents'][1:])}" if len(n["parents"]) > 1 else ""
+            print(f"{'  ' * indent}{nid} [{n['status']}] {short(n['text'], 140)}{extra}{' (above)' if nid in seen else ''}")
+            if a.full and n["result"] and nid not in seen:
+                print(f"{'  ' * indent}   = {short(n['result']['resolution'], 400)}")
+            if nid in seen:
+                return
+            seen.add(nid)
+            for d in n["depends_on"]:
+                walk(d, indent + 1)
 
-Goal:
-$goal
-
-Done when:
-$criteria
-
-Hard constraints. Anything you recommend must respect every one of them. If your branch's best local answer breaks one, say so and give the option that fits:
-$constraints
-
-What the planner knows so far:
-$state
-
-Your branch: $item_id (depth $depth)
-$text
-Why it matters: $why
-Serves: $serves
-
-Other branches running now. Do not duplicate them:
-$siblings
-
-Already covered by earlier branches:
-$covered
-
-Deferred by caps. Do not propose these again:
-$deferred
-
-How to work:
-1. Split your branch into at most $workers sub-questions that together answer it. Use fewer when the branch is small.
-2. Launch one worker per sub-question, all in a single message so they run in parallel. Use the Task tool with subagent_type generalPurpose and model $model. If Task is not a top-level tool, look it up with GetDynamicTools (namespace "cursor", toolName "Task") and call it through CallDynamicTool. Launch at most $workers workers in total.
-3. Give each worker the worker prompt below with the placeholders filled. Workers cannot launch agents.
-4. If your allowance is 0 workers, or you have no Task tool, work the branch yourself. Report workers_used and had_task honestly.
-5. When the workers return, fold their results together. Resolve the conflicts you can. Report the ones you cannot as open. Agreement between workers is not evidence.
-6. Write your full branch notes to $notes. Tell worker k to write its notes to $notes_stem-w<k>.md.
-7. Do not modify any other file. Never write ledger.json.
-
-Every finding needs a basis: a file you read, a command you ran, a page you fetched, or the word "reasoning" when it is inference. Every finding also has a kind: measured (you observed it), sourced (a document or page says it), estimate (your own number), assumption (taken as given to proceed), or reasoning.
-
-Numbers: every number that is not given in the question carries its kind and basis. An estimate keeps its range and the assumption it rests on, in the claim itself: "about 10 to 13 weeks, assuming 3 engineers and no existing queue". Never state an estimate as a fact. Never invent a threshold without saying it is a starting default to replace with a measured baseline.
-
-Substance: put the actual content in the findings, not a pointer to it. If the branch produced a list or a table, the claim holds the items themselves in compact form. "Six failure modes identified, see notes" is not a finding.
-
-Simplicity: prefer the smallest plan that meets the criteria. Do not add gates, phases, roles, or steps that would not change a decision.
-
-Worker prompt:
----
-You are an angles worker. Answer one sub-question. Do not launch agents.
-
-Question: $question
-Branch: $text
-Sub-question: <SUB_QUESTION>
-Notes file: <NOTES_PATH>
-Hard constraints:
-$constraints
-
-You may read files, search, fetch web pages, and run read-only commands. Do not modify anything except your notes file. Write your full notes there.
-
-Every number not given in the question states its kind (measured, sourced, estimate, assumption) and basis. An estimate keeps its range and assumption. Put the actual items in your findings, not a pointer to your notes.
-
-Return ONLY this JSON object:
-{"sub_question": "<SUB_QUESTION>", "summary": "<80 words or fewer>", "findings": [{"claim": "...", "basis": "...", "kind": "measured|sourced|estimate|assumption|reasoning", "confidence": "low|medium|high", "source": "..."}], "gaps": ["..."]}
----
-
-Return ONLY this JSON object to the planner:
-{
-  "item_id": "$item_id",
-  "summary": "<120 words or fewer: what this branch established>",
-  "findings": [{"claim": "...", "basis": "...", "kind": "measured|sourced|estimate|assumption|reasoning", "confidence": "low|medium|high", "source": "..."}],
-  "criteria_progress": [{"criterion": "C1", "status": "met|partial|none", "note": "..."}],
-  "open_items": [{"text": "a next branch worth running", "why": "...", "criteria": ["C1"]}],
-  "settled": false,
-  "workers_used": 0,
-  "had_task": true,
-  "notes_path": "$notes"
-}
-
-At most $max_findings findings and $max_open open_items. Set settled to true when this branch needs no follow-up. Propose open_items only for gaps that serve an open criterion and are not already covered, running, or deferred.
-"""
-)
-
-CHALLENGE_TEMPLATE = string.Template(
-    """You are the angles challenger. The planner has a draft answer. Your job is to break it before anyone relies on it.
-
-Question:
-$question
-
-Goal:
-$goal
-
-Done when:
-$criteria
-
-Hard constraints:
-$constraints
-
-Draft answer:
-$draft
-
-How to work:
-1. Run these four checks yourself before anything else. Each one that finds a problem becomes a challenge.
-   a. Question check. Reread the question word for word. List every part it asks. For each part, is the draft's answer complete and direct? Put every part answered only partly or not at all in question_gaps. Criteria being met does not mean the question is answered.
-   b. Riskiest step. Name the single riskiest action the draft recommends. Check it against every hard constraint, especially deadlines, staffing, and anything touching money or data. If a safer option would meet the goal, that is a challenge.
-   c. Unsourced numbers. Every number not given in the question needs a basis, or must be labeled as an estimate or starting default with its assumption. Each bare number is a challenge with severity weakens at least.
-   d. Dangling references. The draft must contain what it refers to. "Six failure modes", "the table", or "the gates" with no list or table in the draft is a challenge.
-2. List the claims the draft depends on. A claim is load-bearing when the answer changes if it is wrong. Pick at most $workers of the weakest load-bearing claims. Launch one worker per claim, all in a single message, with the Task tool, subagent_type generalPurpose, model $model. If Task is not a top-level tool, look it up with GetDynamicTools (namespace "cursor", toolName "Task") and call it through CallDynamicTool. Launch at most $workers workers in total.
-3. Give each worker this prompt with the placeholders filled:
----
-You are an angles challenge worker. Try to refute one claim. Do not launch agents.
-
-Question: $question
-Claim: <CLAIM>
-Notes file: <NOTES_PATH>
-
-You may read files, search, fetch web pages, and run read-only commands. Modify nothing except your notes file.
-
-Return ONLY this JSON object:
-{"claim": "<CLAIM>", "problem": "<what is wrong, or none found>", "severity": "breaks|weakens|ok", "basis": "..."}
----
-4. If your allowance is 0 workers, or you have no Task tool, run the checks yourself.
-5. Write your full notes to $notes. Tell worker k to write its notes to $notes_stem-w<k>.md. Modify nothing else. Never write ledger.json.
-
-Return ONLY this JSON object:
-{"item_id": "X1", "summary": "<120 words or fewer>", "question_gaps": ["a part of the question the draft does not fully answer"], "challenges": [{"claim": "...", "problem": "...", "severity": "breaks|weakens|ok", "basis": "..."}], "workers_used": 0, "had_task": true, "notes_path": "$notes"}
-
-Severity ok means the claim survived a real attempt to break it. Say what was tried. Agreement is not a refutation attempt.
-"""
-)
+        walk(led["root"], 1)
+    if led["needs"]:
+        print("requests waiting for the matcher:")
+        for x in led["needs"]:
+            print(f"  {x['id']} from {x['from']}: {short(x['question'], 160)}")
+    if led["flight"]:
+        print("in flight: " + ", ".join(f"{k} ({v['role']})" for k, v in led["flight"].items()))
+    for e in led["log"][-8:]:
+        print(f"  event: {short(e['event'], 200)}")
+    print(f"Next: {next_action(led, run_path(a.run))}")
 
 
-def criteria_block(led):
-    if not led["criteria"]:
-        return "none"
-    return "\n".join(f"{c['id']} [{c['status']}] {c['text']}" for c in led["criteria"])
+def validate_ledger(led, run):
+    errors = []
+    b = led["budget"]
+    if b["spent"] > b["limit"] + 0.01:
+        errors.append(f"over budget: ${b['spent']:.2f} of ${b['limit']:.2f}")
+    if b["reserved"] < -0.001:
+        errors.append("reserved went negative")
+    if led["phase"] not in PHASES:
+        errors.append(f"unknown phase {led['phase']}")
+    for nid, n in led["nodes"].items():
+        for d in n["depends_on"]:
+            if d not in led["nodes"]:
+                errors.append(f"{nid} depends on missing {d}")
+            elif nid not in led["nodes"][d]["parents"]:
+                errors.append(f"{d} does not list {nid} as a parent")
+            elif reaches(led, d, nid):
+                errors.append(f"cycle through {nid} and {d}")
+    if led["phase"] == "done":
+        run = Path(run)
+        for name in ("answer.md", "audit.md"):
+            if not (run / name).exists():
+                errors.append(f"{name} missing")
+        if (run / "answer.md").exists():
+            errors += answer_problems((run / "answer.md").read_text(), led["question"])
+        if (run / "audit.md").exists() and AGREEMENT not in (run / "audit.md").read_text():
+            errors.append("audit lacks the agreement sentence")
+        if led["flight"]:
+            errors.append("agents still in flight at finish")
+    return errors
 
 
-def constraints_block(led):
-    constraints = (led["plan"] or {}).get("constraints") or []
-    return "\n".join(f"- {c}" for c in constraints) or "none stated"
-
-
-def write_lead_prompt(led, run, it, wave_items):
-    run = run_path(run)
-    siblings = [f"{s['id']}: {s['text']}" for s in wave_items if s["id"] != it["id"]]
-    done = [i for i in led["items"] if i["kind"] == "branch" and i["status"] == "done"]
-    covered = [f"{i['id']}: {short(i['text'], 320)}" for i in done[-30:]]
-    deferred = [f"{short(d['text'], 320)} ({d['reason']})" for d in led["deferred"][-12:]]
-    notes = run / "notes" / f"{it['id']}.md"
-    text = LEAD_TEMPLATE.substitute(
-        question=led["question"],
-        goal=led["plan"]["goal"],
-        criteria=criteria_block(led),
-        constraints=constraints_block(led),
-        state=led["state"] or "Nothing integrated yet. This is the first wave.",
-        item_id=it["id"],
-        depth=it["depth"],
-        text=it["text"],
-        why=it["why"] or "not stated",
-        serves=", ".join(it["criteria"]) or "none",
-        siblings="\n".join(siblings) or "none",
-        covered="\n".join(covered) or "none",
-        deferred="\n".join(deferred) or "none",
-        workers=it["allowance"],
-        model=MODEL,
-        notes=notes,
-        notes_stem=notes.with_suffix(""),
-        max_findings=MAX_FINDINGS,
-        max_open=MAX_OPEN_ITEMS,
-    )
-    path = run / "prompts" / f"{it['id']}.md"
-    path.write_text(text)
-    return path
-
-
-def write_challenge_prompt(led, run, it, draft):
-    run = run_path(run)
-    notes = run / "notes" / "X1.md"
-    text = CHALLENGE_TEMPLATE.substitute(
-        question=led["question"],
-        goal=led["plan"]["goal"],
-        criteria=criteria_block(led),
-        constraints=constraints_block(led),
-        draft=draft,
-        workers=it["allowance"],
-        model=MODEL,
-        notes=notes,
-        notes_stem=notes.with_suffix(""),
-    )
-    path = run / "prompts" / "X1.md"
-    path.write_text(text)
-    return path
-
-
-def normalize_workers_used(data, errors):
-    used = data.get("workers_used")
-    if isinstance(used, str) and used.strip().isdigit():
-        used = int(used.strip())
-    if isinstance(used, bool) or not isinstance(used, int) or used < 0:
-        errors.append("workers_used must be a non-negative integer")
-        return 0
-    return used
-
-
-def normalize_had_task(data, warnings):
-    had = data.get("had_task")
-    if not isinstance(had, bool):
-        warnings.append("had_task missing or not true/false")
-        return None
-    return had
-
-
-def normalize_findings(raw, warnings):
-    if not isinstance(raw, list):
-        return None
-    out = []
-    for f in raw[:MAX_FINDINGS]:
-        if not isinstance(f, dict) or not as_text(f.get("claim"), 1):
-            warnings.append("dropped a finding without a claim")
-            continue
-        confidence = as_text(f.get("confidence"), 20).lower()
-        if confidence not in CONFIDENCE:
-            warnings.append(f"confidence {confidence!r} recorded as low")
-            confidence = "low"
-        kind = as_text(f.get("kind"), 20).lower()
-        if kind not in SOURCE_KINDS:
-            warnings.append(f"kind {kind!r} recorded as reasoning")
-            kind = "reasoning"
-        out.append(
-            {
-                "claim": as_text(f.get("claim"), 900),
-                "basis": as_text(f.get("basis"), 500) or "none given",
-                "kind": kind,
-                "confidence": confidence,
-                "source": as_text(f.get("source"), 300),
-            }
-        )
-    if len(raw) > MAX_FINDINGS:
-        warnings.append(f"kept the first {MAX_FINDINGS} findings")
-    return out
-
-
-def normalize_branch(data, it):
-    errors, warnings = [], []
-    reported = as_text(data.get("item_id"), 20)
-    if reported and reported != it["id"]:
-        warnings.append(f"reply named {reported}; bound to {it['id']}")
-    summary = as_text(data.get("summary"), 1500)
-    if not summary:
-        errors.append("summary missing")
-    findings = normalize_findings(data.get("findings"), warnings)
-    if findings is None:
-        errors.append("findings must be a list")
-        findings = []
-    raw_open = data.get("open_items", [])
-    if not isinstance(raw_open, list):
-        errors.append("open_items must be a list")
-        raw_open = []
-    open_items = []
-    for o in raw_open:
-        if isinstance(o, dict) and as_text(o.get("text"), 1):
-            open_items.append(
-                {
-                    "text": as_text(o.get("text"), 500),
-                    "why": as_text(o.get("why"), 300),
-                    "criteria": [criterion_id(c) for c in o.get("criteria") or []],
-                }
-            )
-    if len(open_items) > MAX_OPEN_ITEMS:
-        warnings.append(f"kept the first {MAX_OPEN_ITEMS} open_items")
-        open_items = open_items[:MAX_OPEN_ITEMS]
-    progress = []
-    raw_progress = data.get("criteria_progress", [])
-    if isinstance(raw_progress, list):
-        for p in raw_progress:
-            if isinstance(p, dict):
-                progress.append(
-                    {
-                        "criterion": criterion_id(p.get("criterion", "")),
-                        "status": as_text(p.get("status"), 20).lower(),
-                        "note": as_text(p.get("note"), 400),
-                    }
-                )
-    result = {
-        "summary": summary,
-        "findings": findings,
-        "criteria_progress": progress,
-        "open_items": open_items,
-        "settled": bool(data.get("settled", False)),
-        "workers_used": normalize_workers_used(data, errors),
-        "had_task": normalize_had_task(data, warnings),
-        "notes_path": as_text(data.get("notes_path"), 500),
-    }
-    return result, errors, warnings
-
-
-def normalize_challenge(data):
-    errors, warnings = [], []
-    summary = as_text(data.get("summary"), 1500)
-    if not summary:
-        errors.append("summary missing")
-    raw = data.get("challenges")
-    challenges = []
-    if not isinstance(raw, list):
-        errors.append("challenges must be a list")
-        raw = []
-    for c in raw:
-        if not isinstance(c, dict) or not as_text(c.get("claim"), 1):
-            warnings.append("dropped a challenge without a claim")
-            continue
-        severity = as_text(c.get("severity"), 20).lower()
-        if severity not in SEVERITY:
-            warnings.append(f"severity {severity!r} recorded as weakens")
-            severity = "weakens"
-        challenges.append(
-            {
-                "claim": as_text(c.get("claim"), 500),
-                "problem": as_text(c.get("problem"), 800),
-                "severity": severity,
-                "basis": as_text(c.get("basis"), 500) or "none given",
-            }
-        )
-    raw_gaps = data.get("question_gaps", [])
-    if not isinstance(raw_gaps, list):
-        warnings.append("question_gaps was not a list")
-        raw_gaps = []
-    gaps = [as_text(g, 400) for g in raw_gaps if as_text(g, 1)]
-    result = {
-        "summary": summary,
-        "question_gaps": gaps,
-        "challenges": challenges,
-        "workers_used": normalize_workers_used(data, errors),
-        "had_task": normalize_had_task(data, warnings),
-        "notes_path": as_text(data.get("notes_path"), 500),
-    }
-    return result, errors, warnings
+def cmd_validate(a):
+    led = load(a.run)
+    errors = validate_ledger(led, run_path(a.run))
+    for e in errors:
+        print(f"error: {e}")
+    if errors:
+        raise SystemExit(1)
+    print("OK")
 
 
 def cmd_init(a):
@@ -668,628 +1277,79 @@ def cmd_init(a):
     run.mkdir(parents=True, exist_ok=True)
     if ledger_file(run).exists() and not a.force:
         raise HarnessError(f"ledger already exists at {ledger_file(run)}; use status to resume")
-    question = a.question if a.question is not None else read_input(a.question_file)
-    question = question.strip()
+    question = (a.question if a.question is not None else read_file(a.question_file)).strip()
     if not question:
         raise HarnessError("question is empty")
-    waves = a.depth if a.depth is not None else DEFAULT_WAVES
-    agents = a.nodes if a.nodes is not None else DEFAULT_AGENTS
-    if not 1 <= waves <= 8:
-        raise HarnessError("depth must be between 1 and 8")
-    if not 2 <= agents <= 200:
-        raise HarnessError("nodes must be between 2 and 200")
-    for sub in ("notes", "returns", "prompts"):
+    for sub in ("returns", "prompts", "drafts"):
         (run / sub).mkdir(exist_ok=True)
     led = {
-        "version": 3,
+        "version": 4,
         "skill": "angles",
         "created_at": now(),
         "question": question,
         "run_dir": str(run),
-        "phase": "planning",
-        "caps": {
-            "max_waves": waves,
-            "max_agents": agents,
-            "max_leads_per_wave": MAX_LEADS,
-            "max_workers_per_lead": MAX_WORKERS,
-            "max_children_per_parent": MAX_CHILDREN_PER_PARENT,
-            "max_new_items_per_wave": MAX_NEW_ITEMS_PER_WAVE,
-            "challenge_reserve": challenge_reserve(agents),
-        },
-        "overrides": {"depth": a.depth, "nodes": a.nodes},
-        "plan": None,
-        "criteria": [],
-        "items": [],
-        "claim_index": {},
-        "token_index": {},
-        "deferred": [],
-        "waves": [],
-        "state": "",
-        "stall": 0,
-        "agents": {"spent": 0, "reserved": 0},
-        "challenge": None,
-        "stopped": {"complete": False, "reasons": []},
+        "phase": "framing",
+        "caps": {"max_nodes": a.max_nodes, "max_depth": a.max_depth},
+        "models": {"cheap": a.cheap, "strong": a.strong},
+        "budget": {"limit": float(a.budget), "spent": 0.0, "reserved": 0.0},
+        "framing": None,
+        "root": None,
+        "nodes": {},
+        "needs": [],
+        "links": [],
+        "jobs": {},
+        "flight": {},
+        "converge": False,
+        "counter": {"node": 0, "need": 0, "matcher": 0},
+        "spend_log": [],
+        "log": [],
     }
+    if a.budget < endgame_left(led) + cost_of(led, "framer") + 1.0:
+        raise HarnessError(f"budget ${a.budget:.2f} is too small; the framing and the ending alone need about ${endgame_left(led) + cost_of(led, 'framer'):.2f}")
     save(run, led)
     print(f"initialized {run}")
-    print(f"caps: {waves} waves, {agents} agents, {led['caps']['challenge_reserve']} held for the challenge")
+    print(f"models: cheap {a.cheap} for fact pieces, strong {a.strong} for framing, judgment, and the ending")
+    print(budget_line(led))
     print(f"Next: {next_action(led, run)}")
 
 
-def cmd_plan(a):
-    led = load(a.run)
-    require_phase(led, a.run, "planning")
-    data = extract_json(read_input(a.file))
-    goal = as_text(data.get("goal"), 1500)
-    if not goal:
-        raise HarnessError("plan.goal is required")
-    criteria = data.get("criteria")
-    if not isinstance(criteria, list) or not 1 <= len(criteria) <= MAX_CRITERIA:
-        raise HarnessError(f"plan.criteria must be a list of 1 to {MAX_CRITERIA} checkable statements")
-    items = data.get("items")
-    if not isinstance(items, list) or not 1 <= len(items) <= MAX_PLAN_ITEMS:
-        raise HarnessError(f"plan.items must be a list of 1 to {MAX_PLAN_ITEMS} branches")
-    constraints = data.get("constraints")
-    if not isinstance(constraints, list) or len(constraints) > MAX_CONSTRAINTS:
-        raise HarnessError(
-            f"plan.constraints must be a list of 0 to {MAX_CONSTRAINTS} hard limits from the question "
-            "(deadlines, staffing, money, what must not break). Use [] only when the question sets none."
-        )
-    constraints = [as_text(c, 300) for c in constraints if as_text(c, 1)]
-    led["plan"] = {
-        "goal": goal,
-        "approach": as_text(data.get("approach"), 1500),
-        "constraints": constraints,
-    }
-    led["criteria"] = []
-    for n, c in enumerate(criteria, 1):
-        text = as_text(c.get("text") if isinstance(c, dict) else c, 500)
-        if not text:
-            raise HarnessError(f"criterion {n} is empty")
-        led["criteria"].append({"id": f"C{n}", "text": text, "status": "open", "evidence": [], "note": ""})
-    opened, refused = [], []
-    for spec in items:
-        spec = dict(spec) if isinstance(spec, dict) else {"text": spec}
-        spec["parent"] = None
-        it, reason = try_open(led, spec, 0, len(opened))
-        if it:
-            opened.append(it["id"])
-        else:
-            refused.append(f"{as_text(spec.get('text'), 80)!r}: {reason}")
-    if not opened:
-        raise HarnessError("no plan item opened: " + "; ".join(refused))
-    led["phase"] = "waves"
-    save(a.run, led)
-    print(
-        f"plan recorded: {len(led['criteria'])} criteria, {len(constraints)} constraints, "
-        f"branches {', '.join(opened)}"
-    )
-    for r in refused:
-        print(f"refused {r}")
-    print(f"Next: {next_action(led, a.run)}")
-
-
-def cmd_next(a):
-    led = load(a.run)
-    require_phase(led, a.run, "waves")
-    wave = current_wave(led)
-    if wave and wave["status"] != "integrated":
-        raise HarnessError(f"wave {wave['n']} is {wave['status']}. Next: {next_action(led, a.run)}")
-    reasons = maybe_stop(led)
-    if reasons:
-        save(a.run, led)
-        print(f"stopped: {', '.join(reasons)}")
-        print(f"Next: {next_action(led, a.run)}")
-        return
-    n = len(led["waves"]) + 1
-    remaining = led["caps"]["max_waves"] - n + 1
-    avail = available(led)
-    if remaining <= 1:
-        wave_budget = avail
-    else:
-        wave_budget = min(avail, max(math.ceil(avail / remaining), MIN_WAVE_BUDGET))
-    ordered = ordered_frontier(led)
-    leads = min(MAX_LEADS, len(ordered), max(1, wave_budget // 3))
-    if a.leads is not None:
-        leads = max(1, min(a.leads, MAX_LEADS, len(ordered), avail))
-    workers = max(0, min(MAX_WORKERS, (wave_budget - leads) // leads))
-    if a.workers is not None:
-        workers = max(0, min(a.workers, MAX_WORKERS, (avail - leads) // leads))
-    chosen = ordered[:leads]
-    for it in chosen:
-        it["status"] = "dispatched"
-        it["dispatched_wave"] = n
-        it["allowance"] = workers
-        it["attempts"] += 1
-    led["agents"]["reserved"] += leads * (1 + workers)
-    led["waves"].append(
-        {
-            "n": n,
-            "items": [it["id"] for it in chosen],
-            "workers_per_lead": workers,
-            "status": "dispatched",
-            "started_at": now(),
-            "integration": None,
-        }
-    )
-    paths = [write_lead_prompt(led, a.run, it, chosen) for it in chosen]
-    save(a.run, led)
-    print(f"wave {n} of {led['caps']['max_waves']}: {leads} lead(s), up to {workers} worker(s) each")
-    print(f"launch every lead in one message: Task, subagent_type generalPurpose, model {MODEL}, prompt = the launch line below")
-    for it, path in zip(chosen, paths):
-        print(f"  {it['id']} (depth {it['depth']}): {launch_line(path)}")
-    print(f"agents: spent {led['agents']['spent']}, reserved {led['agents']['reserved']}, available {available(led)}")
-    print(f"Next: {next_action(led, a.run)}")
-
-
-def cmd_ingest(a):
-    led = load(a.run)
-    require_phase(led, a.run, "waves", "challenge")
-    it = get_item(led, a.item)
-    if it["status"] != "dispatched":
-        raise HarnessError(f"{it['id']} is {it['status']}, not dispatched")
-    run = run_path(a.run)
-    allowance = it["allowance"] or 0
-    held = 1 + allowance
-    errors, warnings, result = [], [], None
-    if a.failed:
-        errors.append(f"task failed: {a.failed}")
-    else:
-        text = read_input(a.file)
-        (run / "returns" / f"{it['id']}.attempt{it['attempts']}.txt").write_text(text)
-        try:
-            data = extract_json(text)
-        except HarnessError as e:
-            errors.append(str(e))
-        else:
-            if it["kind"] == "challenge":
-                result, errors, warnings = normalize_challenge(data)
-            else:
-                result, errors, warnings = normalize_branch(data, it)
-    led["agents"]["reserved"] -= held
-    if errors:
-        led["agents"]["spent"] += held
-        it["agents_charged"] += held
-        it["error"] = "; ".join(errors)
-        if it["kind"] == "branch" and it["attempts"] < MAX_ATTEMPTS:
-            it["status"] = "frontier"
-            it["allowance"] = None
-            outcome = "requeued for one retry"
-        else:
-            it["status"] = "failed"
-            outcome = "failed"
-    else:
-        used = result["workers_used"]
-        if used > allowance:
-            warnings.append(f"overspend: {used} workers used, {allowance} allowed")
-        charge = 1 + used
-        led["agents"]["spent"] += charge
-        it["agents_charged"] += charge
-        it["status"] = "done"
-        it["result"] = result
-        it["error"] = None
-        outcome = "done"
-    it["warnings"].extend(warnings)
-    if it["kind"] == "challenge":
-        led["challenge"]["status"] = "returned" if outcome == "done" else "failed"
-        led["phase"] = "synthesize"
-    else:
-        wave = next(w for w in led["waves"] if it["id"] in w["items"] and w["status"] == "dispatched")
-        if not any(get_item(led, i)["status"] == "dispatched" for i in wave["items"]):
-            wave["status"] = "returned"
-    save(a.run, led)
-    print(f"{it['id']}: {outcome}")
-    for e in errors:
-        print(f"  error: {e}")
-    for w in warnings:
-        print(f"  warning: {w}")
-    print(f"agents: spent {led['agents']['spent']}, reserved {led['agents']['reserved']}, available {available(led)}")
-    print(f"Next: {next_action(led, a.run)}")
-
-
-def cmd_integrate(a):
-    led = load(a.run)
-    require_phase(led, a.run, "waves")
-    wave = current_wave(led)
-    if not wave or wave["status"] != "returned":
-        raise HarnessError(f"no returned wave to integrate. Next: {next_action(led, a.run)}")
-    data = extract_json(read_input(a.file))
-    state = as_text(data.get("state"), 4000)
-    if not state:
-        raise HarnessError("integrate.state is required: the current answer as it stands")
-    done_ids = {i["id"] for i in led["items"] if i["status"] == "done"}
-    warnings, changes = [], []
-    newly_settled = 0
-    for upd in data.get("criteria") or []:
-        if not isinstance(upd, dict):
-            continue
-        cid = criterion_id(upd.get("id", ""))
-        crit = next((c for c in led["criteria"] if c["id"] == cid), None)
-        if crit is None:
-            warnings.append(f"unknown criterion {cid}")
-            continue
-        status = as_text(upd.get("status"), 20).lower()
-        if status not in CRITERION_STATUS:
-            warnings.append(f"{cid}: status {status!r} ignored")
-            continue
-        evidence = [str(e) for e in upd.get("evidence") or [] if str(e) in done_ids]
-        if status == "met" and not evidence and not crit["evidence"]:
-            warnings.append(f"{cid} left {crit['status']}: met needs a done branch as evidence")
-            continue
-        if crit["status"] == "open" and status != "open":
-            newly_settled += 1
-        crit["status"] = status
-        crit["evidence"] = sorted(set(crit["evidence"]) | set(evidence), key=id_number)
-        crit["note"] = as_text(upd.get("note"), 600)
-        changes.append(f"{cid} -> {status}")
-    dropped = []
-    for d in data.get("drop") or []:
-        did = d.get("id") if isinstance(d, dict) else d
-        reason = as_text(d.get("reason"), 300) if isinstance(d, dict) else ""
-        try:
-            target = get_item(led, str(did))
-        except HarnessError:
-            warnings.append(f"drop: unknown item {did}")
-            continue
-        if target["status"] != "frontier":
-            warnings.append(f"drop: {did} is {target['status']}, not frontier")
-            continue
-        target["status"] = "dropped"
-        target["error"] = f"dropped: {reason or 'no reason given'}"
-        dropped.append(target["id"])
-    opened, refused = [], []
-    for spec in data.get("new_items") or []:
-        it, reason = try_open(led, spec, wave["n"], len(opened))
-        if it:
-            opened.append(it["id"])
-            continue
-        text = as_text(spec.get("text") if isinstance(spec, dict) else spec, 500)
-        refused.append({"text": text, "reason": reason})
-        if reason in CAP_REFUSALS and isinstance(spec, dict):
-            led["deferred"].append(
-                {"text": text, "parent": spec.get("parent"), "reason": reason, "wave": wave["n"]}
-            )
-    led["stall"] = 0 if (newly_settled or opened) else led["stall"] + 1
-    led["state"] = state
-    wave["integration"] = {
-        "at": now(),
-        "state": state,
-        "criteria_changes": changes,
-        "newly_settled": newly_settled,
-        "opened": opened,
-        "refused": refused,
-        "dropped": dropped,
-        "warnings": warnings,
-    }
-    wave["status"] = "integrated"
-    reasons = maybe_stop(led)
-    save(a.run, led)
-    print(f"wave {wave['n']} integrated: {newly_settled} criteria settled, opened {', '.join(opened) or 'none'}")
-    for c in changes:
-        print(f"  {c}")
-    for r in refused:
-        print(f"  refused {short(r['text'], 80)!r}: {r['reason']}")
-    for d in dropped:
-        print(f"  dropped {d}")
-    for w in warnings:
-        print(f"  warning: {w}")
-    if opened and len(led["waves"]) >= led["caps"]["max_waves"]:
-        print("  note: no waves left; the branches just opened stay unexplored. List them under Open questions.")
-    if reasons:
-        print(f"stopped: {', '.join(reasons)}")
-    print(f"Next: {next_action(led, a.run)}")
-
-
-def cmd_challenge(a):
-    led = load(a.run)
-    require_phase(led, a.run, "challenge")
-    if led["challenge"] is not None:
-        raise HarnessError(f"challenge already {led['challenge']['status']}")
-    pool = led["caps"]["max_agents"] - led["agents"]["spent"] - led["agents"]["reserved"]
-    if a.skip or pool < 1:
-        reason = a.skip or "no agents left"
-        led["challenge"] = {"item": None, "status": "skipped", "reason": reason}
-        led["phase"] = "synthesize"
-        save(a.run, led)
-        print(f"challenge skipped: {reason}")
-        print(f"Next: {next_action(led, a.run)}")
-        return
-    draft = read_input(a.draft_file).strip()
-    if not draft:
-        raise HarnessError("draft is empty")
-    workers = max(0, min(MAX_WORKERS, led["caps"]["challenge_reserve"] - 1, pool - 1))
-    it = new_item("X1", "challenge", None, 0, "Challenge the draft answer", "", [], len(led["waves"]))
-    it["status"] = "dispatched"
-    it["allowance"] = workers
-    it["attempts"] = 1
-    led["items"].append(it)
-    led["challenge"] = {"item": "X1", "status": "dispatched", "draft": draft}
-    led["agents"]["reserved"] += 1 + workers
-    path = write_challenge_prompt(led, a.run, it, draft)
-    save(a.run, led)
-    print(f"challenger X1: up to {workers} workers")
-    print(f"launch it: Task, subagent_type generalPurpose, model {MODEL}, prompt = {launch_line(path)}")
-    print(f"Next: {next_action(led, a.run)}")
-
-
-def answer_problems(answer, question):
-    problems = []
-    if not answer.strip():
-        return ["answer is empty"]
-    if ANSWER_REQUIRED_HEADING not in answer:
-        problems.append(f"answer needs a heading starting {ANSWER_REQUIRED_HEADING!r} listing every estimate and assumption")
-    for pattern, label in ANSWER_BANNED:
-        if re.search(pattern, question):
-            continue
-        hits = sorted({m.group(0) for m in re.finditer(pattern, answer)})
-        if hits:
-            problems.append(f"answer contains {label}: {', '.join(hits[:6])}. Move it to the audit")
-    return problems
-
-
-def audit_problems(audit):
-    problems = []
-    if AGREEMENT not in audit:
-        problems.append(f"audit missing the exact sentence: {AGREEMENT}")
-    for heading in AUDIT_HEADINGS:
-        if heading not in audit:
-            problems.append(f"audit missing heading {heading}")
-    return problems
-
-
-def cmd_finish(a):
-    led = load(a.run)
-    require_phase(led, a.run, "synthesize")
-    answer = read_input(a.answer_file)
-    audit = read_input(a.audit_file)
-    problems = answer_problems(answer, led["question"]) + audit_problems(audit)
-    if problems:
-        raise HarnessError("; ".join(problems))
-    run = run_path(a.run)
-    (run / "answer.md").write_text(answer)
-    (run / "audit.md").write_text(audit)
-    led["phase"] = "done"
-    led["stopped"]["complete"] = True
-    led["finished_at"] = now()
-    save(a.run, led)
-    errors = validate_ledger(led, run)
-    print(f"finished: answer {run / 'answer.md'} ({len(answer.split())} words), audit {run / 'audit.md'}")
-    print("validate: OK" if not errors else "validate: " + "; ".join(errors))
-
-
-def validate_ledger(led, run):
-    errors = []
-    caps = led["caps"]
-    if led["phase"] not in PHASES:
-        errors.append(f"unknown phase {led['phase']}")
-    if led["agents"]["spent"] > caps["max_agents"]:
-        errors.append(f"over budget: spent {led['agents']['spent']} of {caps['max_agents']}")
-    if led["agents"]["reserved"] < 0:
-        errors.append("reserved went negative")
-    if led["phase"] == "done" and led["agents"]["reserved"] != 0:
-        errors.append(f"{led['agents']['reserved']} agents still reserved at finish")
-    ids = [i["id"] for i in led["items"]]
-    if len(ids) != len(set(ids)):
-        errors.append("duplicate item ids")
-    if len(led["waves"]) > caps["max_waves"]:
-        errors.append("more waves than max_waves")
-    for w in led["waves"]:
-        if len(w["items"]) > MAX_LEADS:
-            errors.append(f"wave {w['n']} has {len(w['items'])} leads")
-        if w["workers_per_lead"] > MAX_WORKERS:
-            errors.append(f"wave {w['n']} allowed {w['workers_per_lead']} workers per lead")
-    for it in led["items"]:
-        if it["status"] not in ITEM_STATUS:
-            errors.append(f"{it['id']} has status {it['status']}")
-        if it["kind"] == "branch":
-            if not 1 <= it["depth"] <= caps["max_waves"]:
-                errors.append(f"{it['id']} depth {it['depth']} outside 1..{caps['max_waves']}")
-            if led["claim_index"].get(it["claim_key"]) != it["id"]:
-                errors.append(f"{it['id']} missing from claim_index")
-        if len(it["children"]) > MAX_CHILDREN_PER_PARENT:
-            errors.append(f"{it['id']} has {len(it['children'])} children")
-        if it["status"] == "done":
-            if not it["result"]:
-                errors.append(f"{it['id']} done without a result")
-            elif it["result"]["workers_used"] > (it["allowance"] or 0):
-                errors.append(
-                    f"{it['id']} overspent: {it['result']['workers_used']} workers, {it['allowance']} allowed"
-                )
-    done_ids = {i["id"] for i in led["items"] if i["status"] == "done"}
-    for c in led["criteria"]:
-        if c["status"] == "met" and not (set(c["evidence"]) & done_ids):
-            errors.append(f"{c['id']} met without a done branch as evidence")
-    if led["phase"] == "done":
-        run = Path(run)
-        answer, audit = run / "answer.md", run / "audit.md"
-        if answer.exists() or audit.exists():
-            missing = [p.name for p in (answer, audit) if not p.exists()]
-            errors += [f"{name} missing" for name in missing]
-            if not missing:
-                errors += answer_problems(answer.read_text(), led["question"])
-                errors += audit_problems(audit.read_text())
-        elif not (run / "synthesis.md").exists():
-            errors.append("answer.md and audit.md missing")
-        elif AGREEMENT not in (run / "synthesis.md").read_text():
-            errors.append("synthesis.md lacks the agreement sentence")
-    return errors
-
-
-def cmd_validate(a):
-    led = load(a.run)
-    errors = validate_ledger(led, run_path(a.run))
-    if errors:
-        for e in errors:
-            print(f"error: {e}")
-        raise SystemExit(1)
-    print("OK")
-
-
-def launch_line(path):
-    return (
-        f"You are an angles agent. Read {path} with your Read tool and follow it exactly. "
-        "Your final message must be only the JSON object that file asks for."
-    )
-
-
-def short(text, limit=220):
-    text = re.sub(r"\s+", " ", str(text)).strip()
-    if len(text) <= limit:
-        return text
-    cut = text[: limit - 1]
-    if " " in cut[limit // 2:]:
-        cut = cut[: cut.rindex(" ")]
-    return cut.rstrip(" ,;:") + "…"
-
-
-def cmd_status(a):
-    led = load(a.run)
-    caps, agents = led["caps"], led["agents"]
-    wave = current_wave(led)
-    wave_text = f"wave {wave['n']} {wave['status']}" if wave else "no wave yet"
-    print(f"phase: {led['phase']} | {wave_text} | max waves {caps['max_waves']}")
-    reserve = caps["challenge_reserve"] if led["challenge"] is None else 0
-    print(
-        f"agents: spent {agents['spent']}, reserved {agents['reserved']}, available {available(led)}, "
-        f"challenge reserve {reserve}, max {caps['max_agents']}"
-    )
-    if led["plan"]:
-        print(f"goal: {short(led['plan']['goal'], 400)}")
-        for c in led["plan"].get("constraints") or []:
-            print(f"  constraint: {short(c, 200)}")
-    if led["criteria"]:
-        print("criteria:")
-        for c in led["criteria"]:
-            ev = f" (evidence {', '.join(c['evidence'])})" if c["evidence"] else ""
-            print(f"  {c['id']} [{c['status']}] {short(c['text'], 200)}{ev}")
-    if led["state"]:
-        print(f"state: {short(led['state'], 600)}")
-    frontier = ordered_frontier(led)
-    if frontier:
-        print("frontier, in the order the next wave picks:")
-        for it in frontier:
-            parent = f" <- {it['parent']}" if it["parent"] else ""
-            print(f"  {it['id']} d{it['depth']}{parent} [{', '.join(it['criteria']) or '-'}] {short(it['text'], 160)}")
-    if wave:
-        print(f"wave {wave['n']} returns:")
-        for iid in wave["items"]:
-            it = get_item(led, iid)
-            r = it["result"]
-            if not r:
-                print(f"  {iid} {it['status']}{': ' + it['error'] if it['error'] else ''}")
-                continue
-            print(
-                f"  {iid} {it['status']} | workers {r['workers_used']}/{it['allowance']} | "
-                f"had_task {r['had_task']} | settled {r['settled']}"
-            )
-            print(f"    branch: {short(it['text'], 160)}")
-            print(f"    summary: {short(r['summary'], 700)}")
-            for f in r["findings"]:
-                kind = f.get("kind", "reasoning")
-                print(
-                    f"    - [{f['confidence']}, {kind}] {short(f['claim'], 400)} (basis: {short(f['basis'], 140)})"
-                )
-            for p in r["criteria_progress"]:
-                print(f"    {p['criterion']} {p['status']}: {short(p['note'], 160)}")
-            for o in r["open_items"]:
-                print(f"    proposes [{', '.join(o['criteria']) or '-'}] {short(o['text'], 200)} — {short(o['why'], 140)}")
-            if r["notes_path"]:
-                print(f"    notes: {r['notes_path']}")
-            for w in it["warnings"]:
-                print(f"    warning: {w}")
-    ch = led["challenge"]
-    if ch and ch.get("item"):
-        it = get_item(led, ch["item"])
-        print(f"challenge: {ch['status']}")
-        if it["result"]:
-            print(f"  summary: {short(it['result']['summary'], 600)}")
-            for g in it["result"].get("question_gaps") or []:
-                print(f"  question gap: {short(g, 300)}")
-            for c in it["result"]["challenges"]:
-                print(f"  - [{c['severity']}] {short(c['claim'], 200)}: {short(c['problem'], 300)}")
-    elif ch:
-        print(f"challenge: {ch['status']} ({ch.get('reason', '')})")
-    if led["deferred"]:
-        print("deferred by caps:")
-        for d in led["deferred"][-12:]:
-            print(f"  {short(d['text'], 160)} ({d['reason']})")
-    if led["stopped"]["reasons"]:
-        print(f"stop reasons: {', '.join(led['stopped']['reasons'])}")
-    if a.tree:
-        print("tree:")
-        children = {}
-        for it in led["items"]:
-            if it["kind"] == "branch":
-                children.setdefault(it["parent"], []).append(it)
-
-        def walk(parent, indent):
-            for it in sorted(children.get(parent, []), key=lambda i: id_number(i["id"])):
-                print(f"{'  ' * indent}{it['id']} [{it['status']}] {short(it['text'], 140)}")
-                walk(it["id"], indent + 1)
-
-        walk(None, 1)
-    print(f"Next: {next_action(led, a.run)}")
-
-
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="angles.py", description="Ledger for the angles harness.")
+    p = argparse.ArgumentParser(prog="angles.py", description="Whiteboard for the angles harness.")
     sub = p.add_subparsers(dest="cmd", required=True)
-
     s = sub.add_parser("init", help="create a run")
     s.add_argument("run")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--question")
     g.add_argument("--question-file")
-    s.add_argument("--depth", type=int, help="max waves")
-    s.add_argument("--nodes", type=int, help="max agents")
+    s.add_argument("--budget", type=float, default=DEFAULT_BUDGET, help="estimated dollars")
+    s.add_argument("--max-nodes", type=int, default=DEFAULT_MAX_NODES)
+    s.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+    s.add_argument("--cheap", default=DEFAULT_CHEAP)
+    s.add_argument("--strong", default=DEFAULT_STRONG)
     s.add_argument("--force", action="store_true")
-
-    s = sub.add_parser("plan", help="record goal, criteria, first branches")
+    s = sub.add_parser("next", help="launch the next step")
     s.add_argument("run")
-    s.add_argument("--file", required=True)
-
-    s = sub.add_parser("next", help="dispatch the next wave")
+    s = sub.add_parser("ingest", help="read every reply file from the agents in flight")
     s.add_argument("run")
-    s.add_argument("--leads", type=int)
-    s.add_argument("--workers", type=int)
-
-    s = sub.add_parser("ingest", help="record one lead or challenger reply")
+    s.add_argument("--failed", help="mark one agent failed instead")
+    s.add_argument("--reason")
+    s = sub.add_parser("assume", help="settle a stuck piece by assumption")
     s.add_argument("run")
-    s.add_argument("item")
-    g = s.add_mutually_exclusive_group(required=True)
-    g.add_argument("--file")
-    g.add_argument("--failed")
-
-    s = sub.add_parser("integrate", help="fold a returned wave into the plan")
+    s.add_argument("piece")
+    s.add_argument("--text", required=True)
+    s = sub.add_parser("finish", help="check the answer and write the audit")
     s.add_argument("run")
-    s.add_argument("--file", required=True)
-
-    s = sub.add_parser("challenge", help="dispatch the challenger")
+    s = sub.add_parser("status", help="show the graph and the next action")
     s.add_argument("run")
-    g = s.add_mutually_exclusive_group(required=True)
-    g.add_argument("--draft-file")
-    g.add_argument("--skip")
-
-    s = sub.add_parser("finish", help="record the answer and its audit")
-    s.add_argument("run")
-    s.add_argument("--answer-file", required=True)
-    s.add_argument("--audit-file", required=True)
-
-    s = sub.add_parser("status", help="show state and the next action")
-    s.add_argument("run")
-    s.add_argument("--tree", action="store_true")
-
+    s.add_argument("--full", action="store_true")
     s = sub.add_parser("validate", help="check ledger invariants")
     s.add_argument("run")
-
     a = p.parse_args(argv)
     handlers = {
         "init": cmd_init,
-        "plan": cmd_plan,
         "next": cmd_next,
         "ingest": cmd_ingest,
-        "integrate": cmd_integrate,
-        "challenge": cmd_challenge,
+        "assume": cmd_assume,
         "finish": cmd_finish,
         "status": cmd_status,
         "validate": cmd_validate,

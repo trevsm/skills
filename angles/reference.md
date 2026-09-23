@@ -1,143 +1,112 @@
 # Angles reference
 
-The script `scripts/angles.py` owns the ledger, the caps, and the lead and challenger prompts. This file covers the files the planner writes and what the script checks.
+The script `scripts/angles.py` owns the ledger, the graph, the budget, and every prompt. Agents write their replies to `R/returns/<id>.md`: a JSON header in a ```` ```json ```` fence, then free prose. The header drives the graph. The prose is the reasoning that pieces above it and the writer read when they need it. After ingest, each reply moves to `R/returns/archive/`.
 
-## plan.json
+## Ids
 
-```json
-{
-  "goal": "what the user needs, in one or two sentences",
-  "approach": "optional: how you intend to break it down",
-  "constraints": [
-    "a hard limit the question sets, such as a deadline, who is available, or what must not break"
-  ],
-  "criteria": [
-    "a checkable statement of done",
-    "another one"
-  ],
-  "items": [
-    {"text": "a branch to run", "why": "what it unlocks", "criteria": ["C1"]},
-    {"text": "another branch", "why": "...", "criteria": ["C2", "C3"]}
-  ]
-}
-```
+| Id | Agent |
+|----|-------|
+| `F1` | framer |
+| `Q-n` | a piece of the question; the agent that settles it has the same id |
+| `M<k>` | matcher |
+| `W1` | writer |
+| `X1` | challenger |
+| `W2` | reviser |
 
-`constraints` is required: a list of 0 to 8 hard limits. Use `[]` only when the question sets none. They go into every lead, worker, and challenger prompt.
-
-Criteria become `C1`, `C2`, and so on, in order. There are 1 to 6 criteria and 1 to 6 items. Branches become `T1`, `T2`, and so on. A branch whose text matches an existing branch, after lowercasing and dropping punctuation and common words, is refused as `duplicate_item`.
-
-Good criteria can be checked by someone who was not in the run. "The rollback cost is estimated with its main drivers" is a criterion. "Think about rollback" is not.
-
-## integrate-N.json
+## Framer header
 
 ```json
-{
-  "state": "the current answer as it stands, in 200 words or fewer",
-  "criteria": [
-    {"id": "C1", "status": "met", "evidence": ["T1", "T4"], "note": "why"},
-    {"id": "C3", "status": "unmeetable", "evidence": [], "note": "needs data we cannot get"}
-  ],
-  "drop": [{"id": "T6", "reason": "made moot by T2"}],
-  "new_items": [
-    {"text": "the next branch", "why": "the gap it closes", "criteria": ["C2"], "parent": "T2"}
-  ]
-}
+{"id": "F1", "status": "framed",
+ "terms": [{"term": "...", "meaning": "...", "flag": "what is wrong with how the question uses it, or empty"}],
+ "assumptions": ["hidden assumptions in the framing"],
+ "real_question": "...",
+ "crux": "...",
+ "constraints": ["deadlines, who is available, what must not break"],
+ "questions": [{"key": "A", "text": "...", "kind": "fact|judgment", "depends_on": ["B"], "why": "..."}],
+ "root": "A"}
 ```
 
-- `state` is required. The next leads receive it as what the planner knows so far.
-- `met` needs at least one finished branch in `evidence`. Otherwise the criterion stays open and the script warns.
-- `drop` applies only to branches that have not run.
-- `parent` must be a finished branch. Use `null` for a new top-level branch. Depth is the parent's depth plus 1 and may not exceed the wave cap.
-- Refusals: `duplicate_item`, `empty_item`, `unknown_parent`, `parent_not_done`, `depth_exhausted`, `breadth_cap` (the parent already has 3 children), `layer_cap` (6 new branches already opened in this integration). The three cap refusals are kept on a deferred list, shown to later leads, and belong in the audit.
+3 to 14 questions. Unknown keys in `depends_on` fail the reply. Edges that would form a cycle are dropped with a warning. A question with no parent is attached to the root.
 
-## Lead reply
-
-The script writes this schema into every lead prompt. Findings are capped at 6 and proposals at 3. Confidence is `low`, `medium`, or `high`. Kind is `measured`, `sourced`, `estimate`, `assumption`, or `reasoning`. A missing kind is recorded as `reasoning`. Estimates keep their range and assumption in the claim text, and a claim holds the actual list or table rows, not a pointer to the notes. `workers_used` is required. Anything that is not valid JSON counts as a failed attempt. A branch gets one retry in a later wave, then stays failed.
+## Piece header
 
 ```json
-{
-  "item_id": "T1",
-  "summary": "what this branch established",
-  "findings": [{"claim": "...", "basis": "...", "kind": "estimate", "confidence": "medium", "source": "..."}],
-  "criteria_progress": [{"criterion": "C1", "status": "met|partial|none", "note": "..."}],
-  "open_items": [{"text": "...", "why": "...", "criteria": ["C1"]}],
-  "settled": false,
-  "workers_used": 2,
-  "had_task": true,
-  "notes_path": "/tmp/angles.X/notes/T1.md"
-}
+{"id": "Q-4", "status": "resolved|blocked|reframe",
+ "resolution": "150 words or fewer, standalone",
+ "confidence": "low|medium|high",
+ "rests_on": ["Q-5", "assumption: ..."],
+ "needs": [{"question": "...", "why": "..."}],
+ "reframe": {"text": "the better question", "why": "..."},
+ "reject": [{"id": "Q-5", "reason": "..."}]}
 ```
 
-Leads and workers write full notes under `R/notes/`. Replies stay short so the planner's context stays small.
+What the script does with it, in this order:
 
-## Challenger reply
+1. **reject** a settled dependency: that dependency goes back with the objection, and this piece waits and reruns with its earlier work. Each piece can be sent back once. Rejects are ignored while converging.
+2. **reframe**: the piece's text is replaced and it reruns. Once per piece. A second reframe forces it to settle as stated.
+3. **blocked** with needs (at most 4): the needs go to the matcher and the piece waits. After 4 passes, or with no needs, it is forced to settle.
+4. Otherwise the piece is **resolved**. A resolution is required. If the piece had been sent back, every piece that already built on its old answer is sent back once to recheck.
+
+A missing or invalid reply is a failure. A piece gets two tries, then is marked failed, and pieces above it are told to assume in its place.
+
+## Matcher header
 
 ```json
-{
-  "item_id": "X1",
-  "summary": "...",
-  "question_gaps": ["a part of the question the draft does not fully answer"],
-  "challenges": [{"claim": "...", "problem": "...", "severity": "breaks|weakens|ok", "basis": "..."}],
-  "workers_used": 2,
-  "had_task": true,
-  "notes_path": "..."
-}
+{"id": "M1", "status": "matched",
+ "links": [{"need": "N1", "to": "Q-4"},
+           {"need": "N2", "new": {"text": "...", "kind": "fact"}},
+           {"need": "N3", "same_as": "N2"}]}
 ```
+
+A link to an existing piece that would form a cycle, and a new piece past `max_nodes` or `max_depth`, are refused. The asking piece is then told to proceed and state its assumption. A need the matcher skips becomes a new piece with the need's own wording.
+
+## Writer and reviser header
+
+The writer writes the answer to `R/answer-draft.md`. The reviser overwrites it; the previous version is kept in `R/drafts/`.
+
+```json
+{"id": "W1", "status": "written",
+ "claim_map": [{"claim": "...", "from": ["Q-2", "Q-5"]}],
+ "changes": [{"challenge": "only for W2", "change": "..."}]}
+```
+
+## Challenger header
+
+```json
+{"id": "X1", "status": "challenged",
+ "question_gaps": ["..."],
+ "challenges": [{"claim": "...", "problem": "...", "severity": "breaks|weakens|ok", "basis": "..."}]}
+```
+
+Checks: every part of the question answered, the riskiest step against the constraints, unsourced numbers, dangling references, consistency of every derived number, duration, date, and category, and an attack on the two or three load-bearing claims.
+
+## Scheduling
+
+Ready pieces are those whose dependencies are all settled and that have no request waiting on the matcher. They launch deepest first, facts before judgments, up to 6 per step. A matcher launches in the same step whenever requests are waiting. The root settling moves the run to writing.
 
 ## Budget
 
-Each wave gets the agents still available divided by the waves left, with a floor of 6, and the last wave gets everything left. Within a wave, the number of leads is the wave budget divided by 3, capped at 3 and at the number of open branches. Each lead's worker allowance is what is left, split evenly and capped at 3. Agents are reserved when a wave is sent and settled when each reply is ingested.
+| Role | Weight | Default model | Estimate |
+|------|--------|---------------|----------|
+| framer | 1.5 | strong | $0.60 |
+| fact leaf | 1 | cheap | $0.25 |
+| judgment leaf | 1 | strong | $0.40 |
+| piece that builds on others | 1 | strong | $0.40 |
+| matcher | 0.5 | strong | $0.20 |
+| writer | 1.5 | strong | $0.60 |
+| challenger | 1 | strong | $0.40 |
+| reviser | 1 | strong | $0.40 |
 
-At the defaults of 48 agents and 4 waves, a run can send 3 leads with 3 workers each, then 3 leads with 2 each, and so on. Pass `nodes=24` for a cheaper run with fewer workers per lead.
+Base cost per agent: `composer-2.5-fast` $0.25, `claude-opus-5-5-high` $0.40, any other model $0.40. An agent's cost is reserved at launch and moved to spent at ingest. The ending (writer, challenger, reviser) is held back from the start. Free budget is the limit minus spent, in flight, and the held ending.
 
-The next wave takes branches that serve the most open criteria first, then shallower ones, then older ones. It alternates between parents, so one branch's children cannot fill a wave by themselves.
+The run converges when the free budget is less than the estimated cost of every pending piece plus a matcher, or when the piece cap is reached. While converging: requests waiting for the matcher become stated assumptions, no matcher runs, and every piece is told to settle now. If nothing is ready, the deepest stuck piece drops its unsettled dependencies as assumptions and runs. If the budget cannot cover even that, every unsettled piece is marked failed and the writer works from what is settled.
 
-## Answer template
+A typical run of 8 to 12 pieces with a few passes costs $4 to $7 in estimates.
 
-`answer.md` is the deliverable. Write it for the person who asked, as if no harness existed.
+## Answer lint
 
-```markdown
-# <the decision in one line>
+`finish` refuses an answer that lacks a heading starting `## Assumptions` or `## What would change this`, or that contains piece ids (`Q-3`), agent ids (`F1`, `M2`, `W1`, `W2`, `X1`), audit headings (Claim map, Graph, Challenge, Run, Audit, Terms used), or harness words (the framer, the matcher, integrator, the challenger, the reviser, ledger, notes file, whiteboard, angles, "this run" or "the run"). A pattern is skipped when the question itself contains it.
 
-<the answer: decision first, then the plan, then the reasoning a reader needs to trust it.
-Answer every part of the question directly. Put the lists and tables the branches built
-in the answer itself, compact. Name the riskiest step and why it fits the constraints.>
+## Audit
 
-## Assumptions and estimates
-<every number not given in the question, with its range, its basis, and the assumption
-behind it; thresholds with no baseline labeled as starting defaults>
-
-## What would change this
-<the facts only the user can check, and how each would change the answer>
-```
-
-`finish` refuses an answer that has no heading starting `## Assumptions`, or that contains branch or challenger ids (`T3`, `X1`, `T3-w1`), criterion ids (`C2`), audit headings (Coverage, Criteria, Challenge, Run, Divergences, Claim map), criteria bookkeeping ("criterion met"), harness words (planner, the challenger, review pass, branch lead, ledger, notes file), the word angles, or wave numbers. A pattern is skipped when the question itself contains it.
-
-## Audit template
-
-```markdown
-# Audit
-
-## Claim map
-<each load-bearing claim in the answer, followed by the branch ids behind it>
-
-## Criteria
-<each criterion, its status, and its evidence>
-
-## Divergences
-<disagreements left standing>
-
-## Challenge
-<what the challenger tried, the question gaps it found and how each was fixed, what broke,
-what weakened, and what changed because of it>
-
-## Open questions
-<unmet criteria, failed branches, deferred and unexplored branches>
-
-## Run
-<run dir, waves, agents spent of the cap, stop reasons>
-
-Agreement among nodes is not evidence.
-```
-
-`finish` refuses an audit without `## Claim map`, `## Challenge`, `## Open questions`, and that exact sentence. If the challenge was skipped, say why under `## Challenge`.
+The script writes `audit.md` at finish: the framing (real question, crux, terms and flags, constraints, hidden assumptions), the graph with each resolution and which pieces are shared, every change to the graph (blocks, links, rejections, rechecks, reframes, assumptions), the claim map, the challenge and what changed because of it, the unsettled pieces, estimated spend by role and model, and the sentence: Agreement among nodes is not evidence.
