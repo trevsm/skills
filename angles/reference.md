@@ -40,7 +40,7 @@ The script `scripts/angles.py` owns the ledger, the graph, the budget, and every
  "reject": [{"id": "Q-5", "reason": "..."}]}
 ```
 
-A piece that is about to affirm or deny a contested claim, without a settled rescue under it, returns blocked with one need: the strongest account on which the claim still holds, in the defender's terms, with no verdict. A piece whose question is only that account states it and does not ask for a further rescue. A piece that still bundles two claims that could fail separately returns blocked and names those claims instead of answering the bundle.
+Every settled reply sets `job` to `catalog` (terms or a list of claims), `rescue` (the strongest account on which a claim still holds, with no verdict), or `verdict` (affirming or denying a claim). A verdict is refused, and turned into one new piece, unless a settled rescue is already underneath it. While the budget is closing, a verdict is accepted without one. A missing job is a failed reply and the piece is told why.
 
 What the script does with it, in this order:
 

@@ -125,11 +125,33 @@ def parse_reply(text):
     classification and the rest stays in the body.
     """
     text = text.lstrip("\ufeff").strip()
-    fences = list(re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, re.S))
-    if fences:
-        fence = fences[-1]
-        raw = fence.group(1)
-        body = (text[: fence.start()] + text[fence.end() :]).strip()
+    # A fenced block is an opener line (``` or ```json or ```text) through the next
+    # line that is only ```. A closer must not be read as a new opener.
+    spans = []
+    for opener in re.finditer(r"^```([A-Za-z0-9_-]*)[ \t]*\n", text, re.M):
+        closer = re.search(r"^```[ \t]*$", text[opener.end() :], re.M)
+        if not closer:
+            continue
+        raw = text[opener.end() : opener.end() + closer.start()].strip("\n")
+        end = opener.end() + closer.end()
+        spans.append((opener.group(1).lower(), raw, opener.start(), end))
+    parsed = []
+    for tag, raw, start, end in spans:
+        if tag not in ("", "json"):
+            continue
+        try:
+            header = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(header, dict):
+            parsed.append((header, start, end))
+    if parsed:
+        header, start, end = parsed[-1]
+        body = (text[:start] + text[end:]).strip()
+        return header, body
+    if spans:
+        _, raw, start, end = spans[-1]
+        body = (text[:start] + text[end:]).strip()
     else:
         start = text.find("{")
         if start == -1:
@@ -427,8 +449,10 @@ def node_prompt(led, run, n):
         "If this is the wrong question, say what should have been asked, and why.\n"
         "If your question contains two claims that could fail separately, do not answer the bundle. Name each claim as something that has to be settled first.\n"
         "If you are about to affirm or deny a contested claim, and nothing already settled states the strongest account on which that claim still holds, do not invent that account and then defeat it. Name one piece that has to be settled first: the single strongest rescue, in the defender's terms, with no verdict. You answer it on your next pass.\n"
-        "If your own question is only to state that rescue, state it and stop. Do not verdict the claim, and do not ask for a rescue of the rescue.\n"
+        "If your own question is only to state that rescue, state it and stop. Do not verdict the claim, and do not ask for a rescue of the rescue. Set job to rescue.\n"
     )
+    if n.get("error"):
+        parts.append(f"\nYour previous reply was refused: {n['error']}\n")
     if role == "integrator":
         parts.append(
             "\nYou are building on answers that are already settled. Check each one first: does it answer what you need, "
@@ -447,12 +471,15 @@ def node_prompt(led, run, n):
         "Use blocked when you named something that has to be settled first, and put those in needs. "
         "Use reframe when you said the question itself is wrong, and put the better question in reframe. "
         "Use reject only when an answer you were given does not hold, naming its id from the list below. "
-        "Leave needs, reframe, and reject empty when you are not using them.\n"
+        "Leave needs, reframe, and reject empty when you are not using them. "
+        "Set job to catalog when you are only defining terms or listing claims, rescue when you are only stating the strongest account with no verdict, "
+        "or verdict when you are affirming or denying a claim. The script refuses a verdict unless a rescue piece under you is already settled, and it creates that piece itself.\n"
         f"Ids you may name:\n{id_lines}\n"
         f"Your own id is {n['id']}.\n\n"
         f"{REPLY_RULE.format(path=path)}\n"
         "```json\n"
         f'{{"id": "{n["id"]}", "status": "resolved | blocked | reframe",\n'
+        ' "job": "catalog | rescue | verdict",\n'
         ' "resolution": "150 words or fewer, compressed from your prose, hedges included",\n'
         ' "confidence": "low | medium | high",\n'
         ' "rests_on": ["Q-5", "assumption: ..."],\n'
@@ -730,6 +757,20 @@ def ingest_node(led, nid, header, body_path):
     resolution = text_of(header.get("resolution"), 1500)
     if not resolution:
         raise HarnessError("resolution missing")
+    job = text_of(header.get("job"), 20).lower()
+    if job not in ("catalog", "rescue", "verdict"):
+        raise HarnessError("set job to catalog, rescue, or verdict. Use verdict only when affirming or denying a claim. A verdict is refused until a rescue piece under you is settled")
+    n["job"] = job
+    rescued = any(led["nodes"][d].get("job") == "rescue" and led["nodes"][d]["status"] == "resolved" for d in n["depends_on"])
+    if job == "verdict" and not rescued and not (n["force"] or led["converge"]):
+        add_need(led, nid, {
+            "question": f"State the strongest account on which this claim still holds, in the defender's terms, with no verdict: {n['text']}",
+            "why": "A verdict was refused until that account is stated underneath the claim",
+        })
+        n["partials"].append(body_path)
+        n["status"] = "pending"
+        log(led, f"{nid} verdict refused until its rescue is stated")
+        return "verdict refused until its rescue is stated", warnings
     if status not in ("resolved",):
         warnings.append(f"status {status!r} recorded as resolved")
     confidence = text_of(header.get("confidence"), 20).lower()
