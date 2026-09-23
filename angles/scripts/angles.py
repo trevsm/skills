@@ -35,12 +35,24 @@ STOPWORDS = frozenset(
     "a an the of to and or for in on with by from that this is are was were be as at if we they it".split()
 )
 CONFIDENCE = ("low", "medium", "high")
+SOURCE_KINDS = ("measured", "sourced", "estimate", "assumption", "reasoning")
+MAX_CONSTRAINTS = 8
 CRITERION_STATUS = ("open", "met", "unmeetable")
 SEVERITY = ("breaks", "weakens", "ok")
 ITEM_STATUS = ("frontier", "dispatched", "done", "failed", "dropped")
 PHASES = ("planning", "waves", "challenge", "synthesize", "done")
 CAP_REFUSALS = ("depth_exhausted", "breadth_cap", "layer_cap")
-SYNTHESIS_HEADINGS = ("## Answer", "## Challenge", "## Open questions")
+AUDIT_HEADINGS = ("## Claim map", "## Challenge", "## Open questions")
+ANSWER_REQUIRED_HEADING = "## Assumptions"
+ANSWER_BANNED = (
+    (r"\b[TX]\d+(-w\d+)?\b", "branch or challenger ids"),
+    (r"\bC\d+\b", "criterion ids"),
+    (r"(?im)^#+\s*(coverage|criteria|challenge|run|divergences|claim map)\b", "an audit heading"),
+    (r"(?i)\bcriteri(on|a) (met|partial|unmeetable)\b", "criteria bookkeeping"),
+    (r"(?i)\b(the challenger|challenge pass|review pass|branch lead|planner|ledger|notes file)\b", "harness vocabulary"),
+    (r"(?i)\bangles\b", "the harness name"),
+    (r"(?i)\bwaves? \d", "wave numbers"),
+)
 
 
 class HarnessError(Exception):
@@ -303,8 +315,11 @@ def next_action(led, run):
             f"then run: {cmd} ingest {r} X1 --file {r}/returns/X1.txt"
         )
     if phase == "synthesize":
-        return f"write {r}/synthesis-draft.md from the template, then run: {cmd} finish {r} --file {r}/synthesis-draft.md"
-    return f"done. Synthesis at {r}/synthesis.md. Check with: {cmd} validate {r}"
+        return (
+            f"write {r}/answer-draft.md and {r}/audit-draft.md from the templates, then run: "
+            f"{cmd} finish {r} --answer-file {r}/answer-draft.md --audit-file {r}/audit-draft.md"
+        )
+    return f"done. Answer at {r}/answer.md, audit at {r}/audit.md. Check with: {cmd} validate {r}"
 
 
 LEAD_TEMPLATE = string.Template(
@@ -318,6 +333,9 @@ $goal
 
 Done when:
 $criteria
+
+Hard constraints. Anything you recommend must respect every one of them. If your branch's best local answer breaks one, say so and give the option that fits:
+$constraints
 
 What the planner knows so far:
 $state
@@ -345,7 +363,13 @@ How to work:
 6. Write your full branch notes to $notes. Tell worker k to write its notes to $notes_stem-w<k>.md.
 7. Do not modify any other file. Never write ledger.json.
 
-Every finding needs a basis: a file you read, a command you ran, a page you fetched, or the word "reasoning" when it is inference.
+Every finding needs a basis: a file you read, a command you ran, a page you fetched, or the word "reasoning" when it is inference. Every finding also has a kind: measured (you observed it), sourced (a document or page says it), estimate (your own number), assumption (taken as given to proceed), or reasoning.
+
+Numbers: every number that is not given in the question carries its kind and basis. An estimate keeps its range and the assumption it rests on, in the claim itself: "about 10 to 13 weeks, assuming 3 engineers and no existing queue". Never state an estimate as a fact. Never invent a threshold without saying it is a starting default to replace with a measured baseline.
+
+Substance: put the actual content in the findings, not a pointer to it. If the branch produced a list or a table, the claim holds the items themselves in compact form. "Six failure modes identified, see notes" is not a finding.
+
+Simplicity: prefer the smallest plan that meets the criteria. Do not add gates, phases, roles, or steps that would not change a decision.
 
 Worker prompt:
 ---
@@ -355,18 +379,22 @@ Question: $question
 Branch: $text
 Sub-question: <SUB_QUESTION>
 Notes file: <NOTES_PATH>
+Hard constraints:
+$constraints
 
 You may read files, search, fetch web pages, and run read-only commands. Do not modify anything except your notes file. Write your full notes there.
 
+Every number not given in the question states its kind (measured, sourced, estimate, assumption) and basis. An estimate keeps its range and assumption. Put the actual items in your findings, not a pointer to your notes.
+
 Return ONLY this JSON object:
-{"sub_question": "<SUB_QUESTION>", "summary": "<80 words or fewer>", "findings": [{"claim": "...", "basis": "...", "confidence": "low|medium|high", "source": "..."}], "gaps": ["..."]}
+{"sub_question": "<SUB_QUESTION>", "summary": "<80 words or fewer>", "findings": [{"claim": "...", "basis": "...", "kind": "measured|sourced|estimate|assumption|reasoning", "confidence": "low|medium|high", "source": "..."}], "gaps": ["..."]}
 ---
 
 Return ONLY this JSON object to the planner:
 {
   "item_id": "$item_id",
   "summary": "<120 words or fewer: what this branch established>",
-  "findings": [{"claim": "...", "basis": "...", "confidence": "low|medium|high", "source": "..."}],
+  "findings": [{"claim": "...", "basis": "...", "kind": "measured|sourced|estimate|assumption|reasoning", "confidence": "low|medium|high", "source": "..."}],
   "criteria_progress": [{"criterion": "C1", "status": "met|partial|none", "note": "..."}],
   "open_items": [{"text": "a next branch worth running", "why": "...", "criteria": ["C1"]}],
   "settled": false,
@@ -391,12 +419,19 @@ $goal
 Done when:
 $criteria
 
+Hard constraints:
+$constraints
+
 Draft answer:
 $draft
 
 How to work:
-1. List the claims the draft depends on. A claim is load-bearing when the answer changes if it is wrong.
-2. Pick at most $workers of the weakest load-bearing claims. Launch one worker per claim, all in a single message, with the Task tool, subagent_type generalPurpose, model $model. If Task is not a top-level tool, look it up with GetDynamicTools (namespace "cursor", toolName "Task") and call it through CallDynamicTool. Launch at most $workers workers in total.
+1. Run these four checks yourself before anything else. Each one that finds a problem becomes a challenge.
+   a. Question check. Reread the question word for word. List every part it asks. For each part, is the draft's answer complete and direct? Put every part answered only partly or not at all in question_gaps. Criteria being met does not mean the question is answered.
+   b. Riskiest step. Name the single riskiest action the draft recommends. Check it against every hard constraint, especially deadlines, staffing, and anything touching money or data. If a safer option would meet the goal, that is a challenge.
+   c. Unsourced numbers. Every number not given in the question needs a basis, or must be labeled as an estimate or starting default with its assumption. Each bare number is a challenge with severity weakens at least.
+   d. Dangling references. The draft must contain what it refers to. "Six failure modes", "the table", or "the gates" with no list or table in the draft is a challenge.
+2. List the claims the draft depends on. A claim is load-bearing when the answer changes if it is wrong. Pick at most $workers of the weakest load-bearing claims. Launch one worker per claim, all in a single message, with the Task tool, subagent_type generalPurpose, model $model. If Task is not a top-level tool, look it up with GetDynamicTools (namespace "cursor", toolName "Task") and call it through CallDynamicTool. Launch at most $workers workers in total.
 3. Give each worker this prompt with the placeholders filled:
 ---
 You are an angles challenge worker. Try to refute one claim. Do not launch agents.
@@ -414,7 +449,7 @@ Return ONLY this JSON object:
 5. Write your full notes to $notes. Tell worker k to write its notes to $notes_stem-w<k>.md. Modify nothing else. Never write ledger.json.
 
 Return ONLY this JSON object:
-{"item_id": "X1", "summary": "<120 words or fewer>", "challenges": [{"claim": "...", "problem": "...", "severity": "breaks|weakens|ok", "basis": "..."}], "workers_used": 0, "had_task": true, "notes_path": "$notes"}
+{"item_id": "X1", "summary": "<120 words or fewer>", "question_gaps": ["a part of the question the draft does not fully answer"], "challenges": [{"claim": "...", "problem": "...", "severity": "breaks|weakens|ok", "basis": "..."}], "workers_used": 0, "had_task": true, "notes_path": "$notes"}
 
 Severity ok means the claim survived a real attempt to break it. Say what was tried. Agreement is not a refutation attempt.
 """
@@ -425,6 +460,11 @@ def criteria_block(led):
     if not led["criteria"]:
         return "none"
     return "\n".join(f"{c['id']} [{c['status']}] {c['text']}" for c in led["criteria"])
+
+
+def constraints_block(led):
+    constraints = (led["plan"] or {}).get("constraints") or []
+    return "\n".join(f"- {c}" for c in constraints) or "none stated"
 
 
 def write_lead_prompt(led, run, it, wave_items):
@@ -438,6 +478,7 @@ def write_lead_prompt(led, run, it, wave_items):
         question=led["question"],
         goal=led["plan"]["goal"],
         criteria=criteria_block(led),
+        constraints=constraints_block(led),
         state=led["state"] or "Nothing integrated yet. This is the first wave.",
         item_id=it["id"],
         depth=it["depth"],
@@ -466,6 +507,7 @@ def write_challenge_prompt(led, run, it, draft):
         question=led["question"],
         goal=led["plan"]["goal"],
         criteria=criteria_block(led),
+        constraints=constraints_block(led),
         draft=draft,
         workers=it["allowance"],
         model=MODEL,
@@ -507,10 +549,15 @@ def normalize_findings(raw, warnings):
         if confidence not in CONFIDENCE:
             warnings.append(f"confidence {confidence!r} recorded as low")
             confidence = "low"
+        kind = as_text(f.get("kind"), 20).lower()
+        if kind not in SOURCE_KINDS:
+            warnings.append(f"kind {kind!r} recorded as reasoning")
+            kind = "reasoning"
         out.append(
             {
-                "claim": as_text(f.get("claim"), 500),
+                "claim": as_text(f.get("claim"), 900),
                 "basis": as_text(f.get("basis"), 500) or "none given",
+                "kind": kind,
                 "confidence": confidence,
                 "source": as_text(f.get("source"), 300),
             }
@@ -600,8 +647,14 @@ def normalize_challenge(data):
                 "basis": as_text(c.get("basis"), 500) or "none given",
             }
         )
+    raw_gaps = data.get("question_gaps", [])
+    if not isinstance(raw_gaps, list):
+        warnings.append("question_gaps was not a list")
+        raw_gaps = []
+    gaps = [as_text(g, 400) for g in raw_gaps if as_text(g, 1)]
     result = {
         "summary": summary,
+        "question_gaps": gaps,
         "challenges": challenges,
         "workers_used": normalize_workers_used(data, errors),
         "had_task": normalize_had_task(data, warnings),
@@ -628,7 +681,7 @@ def cmd_init(a):
     for sub in ("notes", "returns", "prompts"):
         (run / sub).mkdir(exist_ok=True)
     led = {
-        "version": 2,
+        "version": 3,
         "skill": "angles",
         "created_at": now(),
         "question": question,
@@ -676,7 +729,18 @@ def cmd_plan(a):
     items = data.get("items")
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_PLAN_ITEMS:
         raise HarnessError(f"plan.items must be a list of 1 to {MAX_PLAN_ITEMS} branches")
-    led["plan"] = {"goal": goal, "approach": as_text(data.get("approach"), 1500)}
+    constraints = data.get("constraints")
+    if not isinstance(constraints, list) or len(constraints) > MAX_CONSTRAINTS:
+        raise HarnessError(
+            f"plan.constraints must be a list of 0 to {MAX_CONSTRAINTS} hard limits from the question "
+            "(deadlines, staffing, money, what must not break). Use [] only when the question sets none."
+        )
+    constraints = [as_text(c, 300) for c in constraints if as_text(c, 1)]
+    led["plan"] = {
+        "goal": goal,
+        "approach": as_text(data.get("approach"), 1500),
+        "constraints": constraints,
+    }
     led["criteria"] = []
     for n, c in enumerate(criteria, 1):
         text = as_text(c.get("text") if isinstance(c, dict) else c, 500)
@@ -696,7 +760,10 @@ def cmd_plan(a):
         raise HarnessError("no plan item opened: " + "; ".join(refused))
     led["phase"] = "waves"
     save(a.run, led)
-    print(f"plan recorded: {len(led['criteria'])} criteria, branches {', '.join(opened)}")
+    print(
+        f"plan recorded: {len(led['criteria'])} criteria, {len(constraints)} constraints, "
+        f"branches {', '.join(opened)}"
+    )
     for r in refused:
         print(f"refused {r}")
     print(f"Next: {next_action(led, a.run)}")
@@ -945,26 +1012,48 @@ def cmd_challenge(a):
     print(f"Next: {next_action(led, a.run)}")
 
 
+def answer_problems(answer, question):
+    problems = []
+    if not answer.strip():
+        return ["answer is empty"]
+    if ANSWER_REQUIRED_HEADING not in answer:
+        problems.append(f"answer needs a heading starting {ANSWER_REQUIRED_HEADING!r} listing every estimate and assumption")
+    for pattern, label in ANSWER_BANNED:
+        if re.search(pattern, question):
+            continue
+        hits = sorted({m.group(0) for m in re.finditer(pattern, answer)})
+        if hits:
+            problems.append(f"answer contains {label}: {', '.join(hits[:6])}. Move it to the audit")
+    return problems
+
+
+def audit_problems(audit):
+    problems = []
+    if AGREEMENT not in audit:
+        problems.append(f"audit missing the exact sentence: {AGREEMENT}")
+    for heading in AUDIT_HEADINGS:
+        if heading not in audit:
+            problems.append(f"audit missing heading {heading}")
+    return problems
+
+
 def cmd_finish(a):
     led = load(a.run)
     require_phase(led, a.run, "synthesize")
-    text = read_input(a.file)
-    problems = []
-    if AGREEMENT not in text:
-        problems.append(f"missing the exact sentence: {AGREEMENT}")
-    for heading in SYNTHESIS_HEADINGS:
-        if heading not in text:
-            problems.append(f"missing heading {heading}")
+    answer = read_input(a.answer_file)
+    audit = read_input(a.audit_file)
+    problems = answer_problems(answer, led["question"]) + audit_problems(audit)
     if problems:
         raise HarnessError("; ".join(problems))
     run = run_path(a.run)
-    (run / "synthesis.md").write_text(text)
+    (run / "answer.md").write_text(answer)
+    (run / "audit.md").write_text(audit)
     led["phase"] = "done"
     led["stopped"]["complete"] = True
     led["finished_at"] = now()
     save(a.run, led)
     errors = validate_ledger(led, run)
-    print(f"finished: {run / 'synthesis.md'}")
+    print(f"finished: answer {run / 'answer.md'} ({len(answer.split())} words), audit {run / 'audit.md'}")
     print("validate: OK" if not errors else "validate: " + "; ".join(errors))
 
 
@@ -1011,10 +1100,17 @@ def validate_ledger(led, run):
         if c["status"] == "met" and not (set(c["evidence"]) & done_ids):
             errors.append(f"{c['id']} met without a done branch as evidence")
     if led["phase"] == "done":
-        synthesis = Path(run) / "synthesis.md"
-        if not synthesis.exists():
-            errors.append("synthesis.md missing")
-        elif AGREEMENT not in synthesis.read_text():
+        run = Path(run)
+        answer, audit = run / "answer.md", run / "audit.md"
+        if answer.exists() or audit.exists():
+            missing = [p.name for p in (answer, audit) if not p.exists()]
+            errors += [f"{name} missing" for name in missing]
+            if not missing:
+                errors += answer_problems(answer.read_text(), led["question"])
+                errors += audit_problems(audit.read_text())
+        elif not (run / "synthesis.md").exists():
+            errors.append("answer.md and audit.md missing")
+        elif AGREEMENT not in (run / "synthesis.md").read_text():
             errors.append("synthesis.md lacks the agreement sentence")
     return errors
 
@@ -1059,6 +1155,8 @@ def cmd_status(a):
     )
     if led["plan"]:
         print(f"goal: {short(led['plan']['goal'], 400)}")
+        for c in led["plan"].get("constraints") or []:
+            print(f"  constraint: {short(c, 200)}")
     if led["criteria"]:
         print("criteria:")
         for c in led["criteria"]:
@@ -1087,7 +1185,10 @@ def cmd_status(a):
             print(f"    branch: {short(it['text'], 160)}")
             print(f"    summary: {short(r['summary'], 700)}")
             for f in r["findings"]:
-                print(f"    - [{f['confidence']}] {short(f['claim'], 260)} (basis: {short(f['basis'], 140)})")
+                kind = f.get("kind", "reasoning")
+                print(
+                    f"    - [{f['confidence']}, {kind}] {short(f['claim'], 400)} (basis: {short(f['basis'], 140)})"
+                )
             for p in r["criteria_progress"]:
                 print(f"    {p['criterion']} {p['status']}: {short(p['note'], 160)}")
             for o in r["open_items"]:
@@ -1102,6 +1203,8 @@ def cmd_status(a):
         print(f"challenge: {ch['status']}")
         if it["result"]:
             print(f"  summary: {short(it['result']['summary'], 600)}")
+            for g in it["result"].get("question_gaps") or []:
+                print(f"  question gap: {short(g, 300)}")
             for c in it["result"]["challenges"]:
                 print(f"  - [{c['severity']}] {short(c['claim'], 200)}: {short(c['problem'], 300)}")
     elif ch:
@@ -1167,9 +1270,10 @@ def main(argv=None):
     g.add_argument("--draft-file")
     g.add_argument("--skip")
 
-    s = sub.add_parser("finish", help="record the synthesis")
+    s = sub.add_parser("finish", help="record the answer and its audit")
     s.add_argument("run")
-    s.add_argument("--file", required=True)
+    s.add_argument("--answer-file", required=True)
+    s.add_argument("--audit-file", required=True)
 
     s = sub.add_parser("status", help="show state and the next action")
     s.add_argument("run")

@@ -8,6 +8,9 @@ The script `scripts/angles.py` owns the ledger, the caps, and the lead and chall
 {
   "goal": "what the user needs, in one or two sentences",
   "approach": "optional: how you intend to break it down",
+  "constraints": [
+    "a hard limit the question sets, such as a deadline, who is available, or what must not break"
+  ],
   "criteria": [
     "a checkable statement of done",
     "another one"
@@ -18,6 +21,8 @@ The script `scripts/angles.py` owns the ledger, the caps, and the lead and chall
   ]
 }
 ```
+
+`constraints` is required: a list of 0 to 8 hard limits. Use `[]` only when the question sets none. They go into every lead, worker, and challenger prompt.
 
 Criteria become `C1`, `C2`, and so on, in order. There are 1 to 6 criteria and 1 to 6 items. Branches become `T1`, `T2`, and so on. A branch whose text matches an existing branch, after lowercasing and dropping punctuation and common words, is refused as `duplicate_item`.
 
@@ -43,17 +48,17 @@ Good criteria can be checked by someone who was not in the run. "The rollback co
 - `met` needs at least one finished branch in `evidence`. Otherwise the criterion stays open and the script warns.
 - `drop` applies only to branches that have not run.
 - `parent` must be a finished branch. Use `null` for a new top-level branch. Depth is the parent's depth plus 1 and may not exceed the wave cap.
-- Refusals: `duplicate_item`, `empty_item`, `unknown_parent`, `parent_not_done`, `depth_exhausted`, `breadth_cap` (the parent already has 3 children), `layer_cap` (6 new branches already opened in this integration). The three cap refusals are kept on a deferred list, shown to later leads, and belong in the synthesis.
+- Refusals: `duplicate_item`, `empty_item`, `unknown_parent`, `parent_not_done`, `depth_exhausted`, `breadth_cap` (the parent already has 3 children), `layer_cap` (6 new branches already opened in this integration). The three cap refusals are kept on a deferred list, shown to later leads, and belong in the audit.
 
 ## Lead reply
 
-The script writes this schema into every lead prompt. Findings are capped at 6 and proposals at 3. Confidence is `low`, `medium`, or `high`. `workers_used` is required. Anything that is not valid JSON counts as a failed attempt. A branch gets one retry in a later wave, then stays failed.
+The script writes this schema into every lead prompt. Findings are capped at 6 and proposals at 3. Confidence is `low`, `medium`, or `high`. Kind is `measured`, `sourced`, `estimate`, `assumption`, or `reasoning`. A missing kind is recorded as `reasoning`. Estimates keep their range and assumption in the claim text, and a claim holds the actual list or table rows, not a pointer to the notes. `workers_used` is required. Anything that is not valid JSON counts as a failed attempt. A branch gets one retry in a later wave, then stays failed.
 
 ```json
 {
   "item_id": "T1",
   "summary": "what this branch established",
-  "findings": [{"claim": "...", "basis": "...", "confidence": "medium", "source": "..."}],
+  "findings": [{"claim": "...", "basis": "...", "kind": "estimate", "confidence": "medium", "source": "..."}],
   "criteria_progress": [{"criterion": "C1", "status": "met|partial|none", "note": "..."}],
   "open_items": [{"text": "...", "why": "...", "criteria": ["C1"]}],
   "settled": false,
@@ -71,6 +76,7 @@ Leads and workers write full notes under `R/notes/`. Replies stay short so the p
 {
   "item_id": "X1",
   "summary": "...",
+  "question_gaps": ["a part of the question the draft does not fully answer"],
   "challenges": [{"claim": "...", "problem": "...", "severity": "breaks|weakens|ok", "basis": "..."}],
   "workers_used": 2,
   "had_task": true,
@@ -86,16 +92,34 @@ At the defaults of 48 agents and 4 waves, a run can send 3 leads with 3 workers 
 
 The next wave takes branches that serve the most open criteria first, then shallower ones, then older ones. It alternates between parents, so one branch's children cannot fill a wave by themselves.
 
-## Synthesis template
+## Answer template
+
+`answer.md` is the deliverable. Write it for the person who asked, as if no harness existed.
 
 ```markdown
-# Angles synthesis
+# <the decision in one line>
 
-## Question
-<the question verbatim>
+<the answer: decision first, then the plan, then the reasoning a reader needs to trust it.
+Answer every part of the question directly. Put the lists and tables the branches built
+in the answer itself, compact. Name the riskiest step and why it fits the constraints.>
 
-## Answer
-<the answer, with each load-bearing claim followed by the branch ids behind it>
+## Assumptions and estimates
+<every number not given in the question, with its range, its basis, and the assumption
+behind it; thresholds with no baseline labeled as starting defaults>
+
+## What would change this
+<the facts only the user can check, and how each would change the answer>
+```
+
+`finish` refuses an answer that has no heading starting `## Assumptions`, or that contains branch or challenger ids (`T3`, `X1`, `T3-w1`), criterion ids (`C2`), audit headings (Coverage, Criteria, Challenge, Run, Divergences, Claim map), criteria bookkeeping ("criterion met"), harness words (planner, the challenger, review pass, branch lead, ledger, notes file), the word angles, or wave numbers. A pattern is skipped when the question itself contains it.
+
+## Audit template
+
+```markdown
+# Audit
+
+## Claim map
+<each load-bearing claim in the answer, followed by the branch ids behind it>
 
 ## Criteria
 <each criterion, its status, and its evidence>
@@ -104,7 +128,8 @@ The next wave takes branches that serve the most open criteria first, then shall
 <disagreements left standing>
 
 ## Challenge
-<what the challenger tried, what broke, what weakened, and what changed because of it>
+<what the challenger tried, the question gaps it found and how each was fixed, what broke,
+what weakened, and what changed because of it>
 
 ## Open questions
 <unmet criteria, failed branches, deferred and unexplored branches>
@@ -115,4 +140,4 @@ The next wave takes branches that serve the most open criteria first, then shall
 Agreement among nodes is not evidence.
 ```
 
-`finish` refuses a synthesis without `## Answer`, `## Challenge`, `## Open questions`, and that exact sentence. If the challenge was skipped, say why under `## Challenge`.
+`finish` refuses an audit without `## Claim map`, `## Challenge`, `## Open questions`, and that exact sentence. If the challenge was skipped, say why under `## Challenge`.
