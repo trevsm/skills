@@ -25,8 +25,8 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve()
 AGREEMENT = "Agreement among nodes is not evidence."
 DEFAULT_CHEAP = "composer-2.5-fast"
-DEFAULT_STRONG = "claude-opus-5-5-high"
-BASE_COST = {"composer-2.5-fast": 0.25, "claude-opus-5-5-high": 0.40}
+DEFAULT_STRONG = "composer-2.5-fast"
+BASE_COST = {"composer-2.5-fast": 0.25, "grok-4.7-high-fast": 0.40, "claude-opus-5-5-high": 0.40}
 UNKNOWN_COST = 0.40
 ROLE_WEIGHT = {
     "framer": 1.5,
@@ -118,11 +118,18 @@ def read_file(path):
 
 
 def parse_reply(text):
-    """Split a reply into its JSON header and free-prose body."""
+    """Split a reply into its JSON classification and free-prose body.
+
+    The classification fence may sit at the end, after the prose. A fence at
+    the top still works. When several fences appear, the last one is the
+    classification and the rest stays in the body.
+    """
     text = text.lstrip("\ufeff").strip()
-    fence = re.match(r"```(?:json)?\s*\n(.*?)\n```", text, re.S)
-    if fence:
-        raw, body = fence.group(1), text[fence.end() :]
+    fences = list(re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, re.S))
+    if fences:
+        fence = fences[-1]
+        raw = fence.group(1)
+        body = (text[: fence.start()] + text[fence.end() :]).strip()
     else:
         start = text.find("{")
         if start == -1:
@@ -328,7 +335,8 @@ def framing_block(led):
 
 
 REPLY_RULE = (
-    "Write your reply to {path}. It starts with a JSON header in a ```json fence, followed by free prose. "
+    "Write your reply to {path}. Write the substance in prose first. "
+    "After it, and only after it, add one ```json fence that classifies what you concluded. "
     "Then reply with just the word done."
 )
 
@@ -377,71 +385,75 @@ def dep_block(led, n):
         r = c["result"] or {}
         if c["status"] == "resolved":
             lines.append(
-                f"{d} [{r.get('confidence', '?')} confidence] {c['text']}\n"
-                f"  Resolution: {r.get('resolution', '')}\n"
-                f"  Rests on: {', '.join(r.get('rests_on') or []) or 'not stated'}\n"
-                f"  Full reasoning: {r.get('body_path', 'none')}"
+                f"- {c['text']}\n"
+                f"  Answer ({r.get('confidence', '?')} confidence): {r.get('resolution', '')}\n"
+                f"  Rests on: {', '.join(r.get('rests_on') or []) or 'not stated'}. Full reasoning: {r.get('body_path', 'none')}"
             )
         else:
-            lines.append(f"{d} [could not be settled] {c['text']}\n  State the assumption you make in its place.")
+            lines.append(f"- {c['text']}\n  This could not be settled. State the assumption you make in its place.")
     return "\n".join(lines)
 
 
 def node_prompt(led, run, n):
     path = run_path(run) / "returns" / f"{n['id']}.md"
     role = role_of_node(n)
-    parents = "\n".join(f"- {p}: {led['nodes'][p]['text']}" for p in n["parents"]) or "- none: this is the root"
+    parents = "\n".join(f"- {led['nodes'][p]['text']}" for p in n["parents"]) or "- none yet"
     parts = [
-        "You are one agent on a larger question. You own one piece of it. Other agents own the other pieces. "
-        "When you settle yours, the pieces that depend on it build on your answer, so it has to hold.\n",
+        "Answer the question below. Someone else will build on your answer, so it has to hold on its own.\n\n",
         framing_block(led),
-        f"\nYour piece: {n['id']} ({n['kind']})\n{n['text']}\nWhy it matters: {n['why'] or 'not stated'}\n"
-        f"Pieces that depend on yours:\n{parents}\n",
+        f"\nThe question for you:\n{n['text']}\n\nWhy it matters: {n['why'] or 'not stated'}\n"
+        f"Questions that will build on your answer:\n{parents}\n",
     ]
     if n["depends_on"]:
-        parts.append(f"\nWhat your piece rests on:\n{dep_block(led, n)}\n")
+        parts.append(f"\nWhat is already settled, which your answer may rest on:\n{dep_block(led, n)}\n")
     if n["objection"]:
         parts.append(
-            f"\nYour earlier answer to this piece was sent back by {n['objection']['from']}: {n['objection']['reason']}. "
-            f"Your earlier answer is in {n['objection']['previous']}. Address this directly.\n"
+            f"\nYour earlier answer was sent back: {n['objection']['reason']}. "
+            f"It is in {n['objection']['previous']}. Address this directly.\n"
         )
     if n["partials"]:
-        parts.append(f"\nYour earlier work on this piece, before you asked for help: {n['partials'][-1]}. Read it and continue from it.\n")
+        parts.append(f"\nYour earlier work, before you asked for something else: {n['partials'][-1]}. Read it and continue from it.\n")
     if n["assume"]:
         items = "\n".join(f"- {a}" for a in n["assume"])
         parts.append(f"\nThese will not be settled for you. Proceed without them and state the assumption you make for each:\n{items}\n")
-    if n["force"] or led["converge"]:
-        parts.append("\nThe budget is closing. You must settle your piece now. Do not return blocked, reframe, or reject. State your assumptions instead.\n")
     parts.append(
-        "\nHow to work: however you judge best. Read, search, fetch pages, reason, run read-only commands. "
-        "Do not launch agents. If your piece is too big, or rests on something unsettled, return blocked and name what "
-        "you need. It will be settled and you will be sent back here with the answer.\n"
+        "\nAnswer it however you judge best. Read, search, fetch pages, reason, run read-only commands. "
+        "Do not launch agents. Settled means you could defend the answer to a skeptic who knows the domain. "
+        "Say what it rests on. Every number not given in the question says whether it is measured, sourced, "
+        "an estimate with a range and the assumption behind it, or an assumption. Uncertainty stays explicit.\n"
+        "If you cannot answer well without something you do not have, name that instead of guessing.\n"
+        "If something you were given looks wrong, say what and why.\n"
+        "If this is the wrong question, say what should have been asked, and why.\n"
     )
     if role == "integrator":
         parts.append(
-            "\nYou are building on settled pieces. First check each one: does it actually answer what your piece needs, "
-            "and does it hold up? If one does not, reject it with the reason and it goes back for another pass. You can "
-            "do this once per piece. Then do the thinking this level needs: resolve the tensions between the pieces, "
-            "weigh them, and decide. Do not just restate them.\n"
+            "\nYou are building on answers that are already settled. Check each one first: does it answer what you need, "
+            "and does it hold up? Say so if one does not. Then do the thinking this level needs. Resolve the tensions, "
+            "weigh them, and decide. Do not just restate the answers under you.\n"
         )
+    if n["force"] or led["converge"]:
+        parts.append("\nThe budget is closing. You must settle your piece now. State your assumptions instead of asking for more.\n")
+    id_lines = "\n".join(f"- {d}: {led['nodes'][d]['text']}" for d in n["depends_on"]) or "- none"
     parts.append(
-        "\nSettled means you could defend it to a skeptic who knows the domain. What it rests on is stated. Every "
-        "number not given in the question says whether it is measured, sourced, an estimate (with a range and the "
-        "assumption behind it), or an assumption. Uncertainty is explicit. If you cannot reach that bar without "
-        "another piece settled first, you are blocked, not settled. If your piece is framed wrong, say so: return "
-        "reframe with the better question.\n\n"
-        f"{REPLY_RULE.format(path=path)} Put the substance in the prose: the argument, lists, tables, numbers. "
-        "Pieces above you read the resolution first and your prose when they need it. The header:\n"
+        "\nWrite that answer in prose: the argument, the lists, the tables, the numbers.\n\n"
+        "Then classify your own answer. This fence is bookkeeping for the people coordinating the work. "
+        "It must match the prose, not replace it. Use status resolved when you answered. "
+        "Use blocked when you named something that has to be settled first, and put those in needs. "
+        "Use reframe when you said the question itself is wrong, and put the better question in reframe. "
+        "Use reject only when an answer you were given does not hold, naming its id from the list below. "
+        "Leave needs, reframe, and reject empty when you are not using them.\n"
+        f"Ids you may name:\n{id_lines}\n"
+        f"Your own id is {n['id']}.\n\n"
+        f"{REPLY_RULE.format(path=path)}\n"
         "```json\n"
         f'{{"id": "{n["id"]}", "status": "resolved | blocked | reframe",\n'
-        ' "resolution": "150 words or fewer: your answer to this piece as a standalone statement others can build on",\n'
+        ' "resolution": "150 words or fewer, compressed from your prose, hedges included",\n'
         ' "confidence": "low | medium | high",\n'
         ' "rests_on": ["Q-5", "assumption: ..."],\n'
-        ' "needs": [{"question": "a piece that must be settled first", "why": "..."}],\n'
+        ' "needs": [{"question": "what has to be settled first", "why": "..."}],\n'
         ' "reframe": {"text": "the better question", "why": "..."},\n'
         ' "reject": [{"id": "Q-5", "reason": "..."}]}\n'
         "```\n"
-        "Fill needs only when blocked, reframe only when reframing, reject only when rejecting a dependency.\n"
     )
     return "".join(parts)
 
@@ -453,6 +465,8 @@ def matcher_prompt(led, run, jid, needs):
     return f"""You are the matcher. Pieces of a larger question have asked for other pieces to be settled first. For each request, decide whether it is the same question as a piece that already exists, even if worded differently, or a new piece.
 
 Same means settling the existing piece would give the requester what it needs. Close but different is new. When two requests ask for the same new thing, make one new piece and point the other request at it with same_as.
+
+Some requests can only be answered by the person who asked the question: their own data, logs, contracts, or customer conversations. No agent can settle those. Mark them reader. The requester proceeds on a stated assumption, and the final answer tells the reader to check that fact and how it would change the answer. Only mark reader when the fact truly cannot be reasoned about or looked up.
 
 The question being worked:
 {led['question']}
@@ -470,7 +484,8 @@ Do not launch agents.
 {{"id": "{jid}", "status": "matched",
  "links": [{{"need": "N1", "to": "Q-4"}},
            {{"need": "N2", "new": {{"text": "a crisp question", "kind": "fact"}}}},
-           {{"need": "N3", "same_as": "N2"}}]}}
+           {{"need": "N3", "same_as": "N2"}},
+           {{"need": "N4", "reader": "the fact to check, in one line"}}]}}
 ```
 """
 
@@ -525,6 +540,13 @@ def writer_prompt(led, run, jid, draft_path, challenge=None, previous=None):
         f"Its full reasoning: {rr.get('body_path', 'none')}\n\n"
         f"Every piece, deepest last. Read the full reasoning of any piece you rely on:\n{settled_block(led)}\n\n",
     ]
+    checks = led.get("reader_checks") or []
+    if checks:
+        items = "\n".join(f"- {c['fact']} (why it matters: {c['why']})" for c in checks)
+        parts.append(
+            f"Facts only the reader can check. The pieces assumed the likely case. Each belongs under \"## What would change this\" "
+            f"with what the reader should look at and how each outcome changes the answer. Merge overlapping ones:\n{items}\n\n"
+        )
     if challenge is not None:
         parts.append(
             f"You are revising. The current draft is {previous}. A challenger attacked it:\n{challenge}\n\n"
@@ -533,9 +555,10 @@ def writer_prompt(led, run, jid, draft_path, challenge=None, previous=None):
         )
     parts.append(ANSWER_RULES)
     parts.append(
-        f"\nWrite the answer itself to {draft_path}, overwriting it. Then write your reply to {path}: a JSON header in a "
-        "```json fence, followed by any notes. The claim map is for the audit, never the answer: each load-bearing "
-        "claim in the answer and the pieces it comes from. Then reply with just the word done.\n"
+        f"\nWrite the answer itself to {draft_path}, overwriting it. That file is the answer a reader sees. "
+        f"Then write your reply to {path}: any notes in prose, then one ```json fence that classifies the answer you wrote. "
+        "The claim map is for the audit, never the answer: each load-bearing claim and the pieces it comes from. "
+        "Then reply with just the word done.\n"
         "```json\n"
         f'{{"id": "{jid}", "status": "written",\n'
         ' "claim_map": [{"claim": "...", "from": ["Q-2", "Q-5"]}],\n'
@@ -565,7 +588,9 @@ f. Load-bearing claims. Pick the two or three claims the answer most depends on 
 
 Do not launch agents. Severity ok means the claim survived a real attempt to break it; say what you tried.
 
-{REPLY_RULE.format(path=path)} The header:
+Write what you found in prose first. Then classify it.
+
+{REPLY_RULE.format(path=path)} The classification:
 ```json
 {{"id": "X1", "status": "challenged",
  "question_gaps": ["a part of the question the draft does not fully answer"],
@@ -744,6 +769,7 @@ def refresh_stale(led, n):
 
 
 def ingest_matcher(led, jid, header):
+    led.setdefault("reader_checks", [])
     assigned = [x for x in led["needs"] if x["assigned"] == jid]
     by_id = {x["id"]: x for x in assigned}
     links = {text_of(l.get("need"), 20): l for l in header.get("links") or [] if isinstance(l, dict)}
@@ -773,7 +799,12 @@ def ingest_matcher(led, jid, header):
     later = []
     for x in assigned:
         l = links.get(x["id"], {})
-        if text_of(l.get("to"), 20) in led["nodes"]:
+        if l.get("reader"):
+            fact = text_of(l["reader"], 400) if isinstance(l["reader"], str) else x["question"]
+            led["reader_checks"].append({"fact": fact, "from": x["from"], "why": x["why"]})
+            led["nodes"][x["from"]]["assume"].append(f"{fact} (only the reader can check this; assume the most likely case and say how the other case changes your answer)")
+            notes.append(f"{x['id']} -> reader check")
+        elif text_of(l.get("to"), 20) in led["nodes"]:
             target = text_of(l["to"], 20)
             err = link(led, x["from"], target)
             if err:
@@ -1095,6 +1126,7 @@ def build_audit(led):
             out.append(f"- {n['id']} was reframed from: {' / '.join(short(t, 200) for t in n['old_texts'])}")
         if n["assume"]:
             out.append(f"- {n['id']} proceeded on assumptions for: {'; '.join(short(x, 160) for x in n['assume'])}")
+    out += [f"- reader check (from {c['from']}): {short(c['fact'], 300)}" for c in led.get("reader_checks") or []]
     claim_map = (led["jobs"].get("W2") or led["jobs"].get("W1") or {}).get("claim_map") or []
     out += ["", "## Claim map", ""]
     for c in claim_map:
@@ -1297,6 +1329,7 @@ def cmd_init(a):
         "nodes": {},
         "needs": [],
         "links": [],
+        "reader_checks": [],
         "jobs": {},
         "flight": {},
         "converge": False,
@@ -1308,7 +1341,10 @@ def cmd_init(a):
         raise HarnessError(f"budget ${a.budget:.2f} is too small; the framing and the ending alone need about ${endgame_left(led) + cost_of(led, 'framer'):.2f}")
     save(run, led)
     print(f"initialized {run}")
-    print(f"models: cheap {a.cheap} for fact pieces, strong {a.strong} for framing, judgment, and the ending")
+    if a.cheap == a.strong:
+        print(f"models: every subagent uses {a.cheap}")
+    else:
+        print(f"models: {a.cheap} for fact pieces, {a.strong} for framing, judgment, and the ending")
     print(budget_line(led))
     print(f"Next: {next_action(led, run)}")
 

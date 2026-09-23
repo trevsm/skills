@@ -5,8 +5,8 @@ description: >-
   way a careful person reasons: pin down terms and premises first, settle the
   pieces they unlock, then the real question. Pieces can ask for missing
   dependencies, send weak ones back, or say they are framed wrong; shared
-  dependencies are settled once. Cheap models settle facts, a strong model does
-  framing, judgment, and the final answer. Use when the user invokes angles,
+  dependencies are settled once. Every subagent runs on Composer 2.5 Fast.
+  Use when the user invokes angles,
   asks for every angle, or asks for exhaustive work on a hard problem, question,
   or goal. Explicit invoke only.
 disable-model-invocation: true
@@ -18,22 +18,22 @@ You run a loop. You do not think about the question. The script decides what run
 
 ## How it works
 
-1. **Frame.** One strong agent pins down the terms, flags category errors and hidden assumptions, restates the real question, names the likely crux, lists the hard constraints, and lays out the question as a graph: the root depends on pieces, which depend on smaller pieces, down to leaves one agent can settle. Two pieces that need the same thing share one piece.
-2. **Settle bottom-up.** A piece runs once everything it rests on is settled, deepest first, up to 6 at once. Each agent gets the framing, its piece, and the settled answers below it. Every agent can settle its piece, or return:
+1. **Frame.** One agent pins down the terms, flags category errors and hidden assumptions, restates the real question, names the likely crux, lists the hard constraints, and lays out the question as a graph: the root depends on pieces, which depend on smaller pieces, down to leaves one agent can settle. Two pieces that need the same thing share one piece.
+2. **Settle bottom-up.** A piece runs once everything it rests on is settled, deepest first, up to 6 at once. Each agent is asked its question in ordinary language, with the situation and the settled answers under it, and answers in prose. At the end it classifies its own answer: settled, missing something, a dependency that does not hold, or a question framed wrong. The outcomes are:
    - **blocked**, naming what it needs. A matcher links each need to an existing piece when it is the same question, or makes a new piece. The blocked piece runs again once that is settled, with its earlier work.
    - **reject**, on a weak dependency. That piece goes back once with the objection. Anything that already built on it is sent back once to recheck against the revision.
    - **reframe**, when its question is framed wrong. Once per piece.
 3. **Converge.** When the free budget no longer covers the rest of the graph, no new pieces are made, and every remaining piece must settle on stated assumptions. A request that would create a loop or break a cap also becomes a stated assumption.
-4. **Write, challenge, revise.** A strong writer turns the settled graph into the answer. A challenger rereads the question, tests the riskiest step, checks numbers and dates for consistency, and attacks the load-bearing claims. A reviser fixes what it found.
+4. **Write, challenge, revise.** A writer turns the settled graph into the answer. A challenger rereads the question, tests the riskiest step, checks numbers and dates for consistency, and attacks the load-bearing claims. A reviser fixes what it found.
 5. **Finish.** The script checks the answer for leaked bookkeeping and required sections, and builds `audit.md` itself from the graph.
 
 ## Models and budget
 
-Leaves marked fact run on the cheap model, `composer-2.5-fast` by default. The framer, matcher, judgment leaves, every piece that builds on others, the writer, the challenger, and the reviser run on the strong model, `claude-opus-5-5-high` by default. The strong model only makes short judgment calls on material already gathered, so it adds little cost.
+Every subagent runs on `composer-2.5-fast`: the framer, every piece, the matcher, the writer, the challenger, and the reviser. Launch with the model the script prints. That model is Composer unless the user names a different one.
 
-The budget is in estimated dollars, $8 by default. The script holds back enough for the writer, challenger, and reviser from the start, so a run always ends with an answer. Estimates are rough: about $0.25 per cheap agent and $0.40 per strong agent, weighted by role. They are not a bill.
+The budget is in estimated dollars, $8 by default. The script holds back enough for the writer, challenger, and reviser from the start, so a run always ends with an answer. Estimates are rough, about $0.25 per agent before role weight. They are not a bill.
 
-User overrides: `budget=N` becomes `--budget N`, `nodes=N` becomes `--max-nodes N`, `depth=N` becomes `--max-depth N`, `cheap=<model>` becomes `--cheap`, and `strong=<model>` becomes `--strong`. Pass `--strong composer-2.5-fast` for an all-cheap run.
+User overrides: `budget=N` becomes `--budget N`, `nodes=N` becomes `--max-nodes N`, `depth=N` becomes `--max-depth N`. `cheap=<model>` and `strong=<model>` override the model only when the user names one.
 
 ## The loop
 

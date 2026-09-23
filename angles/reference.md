@@ -1,6 +1,6 @@
 # Angles reference
 
-The script `scripts/angles.py` owns the ledger, the graph, the budget, and every prompt. Agents write their replies to `R/returns/<id>.md`: a JSON header in a ```` ```json ```` fence, then free prose. The header drives the graph. The prose is the reasoning that pieces above it and the writer read when they need it. After ingest, each reply moves to `R/returns/archive/`.
+The script `scripts/angles.py` owns the ledger, the graph, the budget, and every prompt. Agents write their replies to `R/returns/<id>.md`: the substance in prose first, then one ```` ```json ```` fence that classifies it. The fence drives the graph. The prose is the reasoning that pieces above it and the writer read. A fence at the top still ingests. After ingest, each reply moves to `R/returns/archive/`.
 
 ## Ids
 
@@ -88,16 +88,16 @@ Ready pieces are those whose dependencies are all settled and that have no reque
 
 | Role | Weight | Default model | Estimate |
 |------|--------|---------------|----------|
-| framer | 1.5 | strong | $0.60 |
-| fact leaf | 1 | cheap | $0.25 |
-| judgment leaf | 1 | strong | $0.40 |
-| piece that builds on others | 1 | strong | $0.40 |
-| matcher | 0.5 | strong | $0.20 |
-| writer | 1.5 | strong | $0.60 |
-| challenger | 1 | strong | $0.40 |
-| reviser | 1 | strong | $0.40 |
+| framer | 1.5 | composer-2.5-fast | $0.38 |
+| fact leaf | 1 | composer-2.5-fast | $0.25 |
+| judgment leaf | 1 | composer-2.5-fast | $0.25 |
+| piece that builds on others | 1 | composer-2.5-fast | $0.25 |
+| matcher | 0.5 | composer-2.5-fast | $0.13 |
+| writer | 1.5 | composer-2.5-fast | $0.38 |
+| challenger | 1 | composer-2.5-fast | $0.25 |
+| reviser | 1 | composer-2.5-fast | $0.25 |
 
-Base cost per agent: `composer-2.5-fast` $0.25, `claude-opus-5-5-high` $0.40, any other model $0.40. An agent's cost is reserved at launch and moved to spent at ingest. The ending (writer, challenger, reviser) is held back from the start. Free budget is the limit minus spent, in flight, and the held ending.
+Base cost per agent: `composer-2.5-fast` $0.25, any other model $0.40. Every subagent uses Composer unless a run is started with `--cheap` or `--strong`. An agent's cost is reserved at launch and moved to spent at ingest. The ending (writer, challenger, reviser) is held back from the start. Free budget is the limit minus spent, in flight, and the held ending.
 
 The run converges when the free budget is less than the estimated cost of every pending piece plus a matcher, or when the piece cap is reached. While converging: requests waiting for the matcher become stated assumptions, no matcher runs, and every piece is told to settle now. If nothing is ready, the deepest stuck piece drops its unsettled dependencies as assumptions and runs. If the budget cannot cover even that, every unsettled piece is marked failed and the writer works from what is settled.
 
